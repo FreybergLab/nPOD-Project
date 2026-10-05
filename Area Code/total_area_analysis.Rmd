@@ -1,0 +1,239 @@
+---
+title: "Area_analysis"
+output: html_document
+date: "2026-03-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+
+library(emmeans)
+library(glmmTMB)
+library(dplyr)
+```
+
+```{r load-area-models}
+# Total area models
+for (f in list.files("Area/Models/Total_Area", pattern = "\\.rds$", full.names = TRUE)) {
+  assign(tools::file_path_sans_ext(basename(f)), readRDS(f))
+  closeAllConnections()
+}
+
+cat("Loaded", length(list.files("Area/Models/Total_Area", pattern = "\\.rds$")), "total area models\n")
+```
+
+```{r load-area-data}
+# --- Area datasets by size category ---
+area_data_joined <- readRDS("Data/area_data.rds")
+area_t1d         <- readRDS("Data/area_data_t1d.rds")
+
+area_singlets      <- readRDS("Data/area_data_singlets.rds")
+area_singlets_t1d  <- readRDS("Data/area_data_singlets_t1d.rds")
+area_endobs        <- readRDS("Data/area_data_endobs.rds")
+area_endobs_t1d    <- readRDS("Data/area_data_endobs_t1d.rds")
+area_islets        <- readRDS("Data/area_data_islets.rds")
+area_islets_t1d    <- readRDS("Data/area_data_islets_t1d.rds")
+
+# --- Area combined datasets (logIC zeroed for singletons, per cell type) ---
+beta_combined      <- readRDS("Data/area_data_beta_combined.rds")
+beta_combined_t1d  <- readRDS("Data/area_data_beta_combined_t1d.rds")
+alpha_combined     <- readRDS("Data/area_data_alpha_combined.rds")
+alpha_combined_t1d <- readRDS("Data/area_data_alpha_combined_t1d.rds")
+delta_combined     <- readRDS("Data/area_data_delta_combined.rds")
+delta_combined_t1d <- readRDS("Data/area_data_delta_combined_t1d.rds")
+pp_combined        <- readRDS("Data/area_data_pp_combined.rds")
+pp_combined_t1d    <- readRDS("Data/area_data_pp_combined_t1d.rds")
+```
+
+```{r exploratory}
+summary(beta_combined_model)
+summary(alpha_combined_model)
+
+# These don't adjust for islet size — does Diagnosis appear?
+emmeans(area_alpha_1cell,  ~ Diagnosis, data = area_singlets)
+emmeans(area_alpha_2to14,  ~ Diagnosis, data = area_endobs)
+
+# This does adjust for islet size — does Diagnosis disappear?
+emmeans(area_alpha_15plus, ~ Diagnosis, data = area_islets)
+
+alpha_combined <- alpha_combined %>%
+  mutate(object_type = factor(case_when(
+    Islet.Cells == 1 ~ "Singlets",
+    Islet.Cells >= 2 & Islet.Cells <= 14 ~ "SEOs",
+    Islet.Cells >= 15 ~ "Islets"),
+    levels = c("Singlets", "SEOs", "Islets")))
+
+emmeans(alpha_combined_model, pairwise ~ Diagnosis | object_type,
+        data = alpha_combined, adjust = "none", reverse = TRUE)
+
+beta_combined <- beta_combined %>%
+  mutate(object_type = factor(case_when(
+    Islet.Cells == 1 ~ "Singlets",
+    Islet.Cells >= 2 & Islet.Cells <= 14 ~ "SEOs",
+    Islet.Cells >= 15 ~ "Islets"),
+    levels = c("Singlets", "SEOs", "Islets")))
+
+emmeans(beta_combined_model, pairwise ~ Diagnosis | object_type,
+        data = beta_combined, adjust = "none", reverse = TRUE)
+
+# Individual singlet model (fit only on singlets)
+emmeans(area_alpha_1cell, pairwise ~ Diagnosis, 
+        data = area_singlets, 
+        adjust = "none", reverse = TRUE)
+
+# Combined model, singlet slice
+emmeans(alpha_combined_model, pairwise ~ Diagnosis | object_type, 
+        data = alpha_combined, 
+        adjust = "none", reverse = TRUE)
+
+# Compare residual SDs
+sigma(area_alpha_1cell)       # singlet-only residual
+sigma(alpha_combined_model)   # pooled across all object types
+```
+
+```{r excel-t1d}
+source("Area/R/generate_area_t1d_excel.R")
+generate_all_area_t1d_excel()
+```
+
+```{r excel-diag}
+source("Area/R/generate_area_excel_diag.R")
+generate_all_area_excel()
+```
+
+# Area Plots — one cell type per chunk
+
+Running all 4 cell types in a single chunk exhausts R's file connection limit
+(~500 plots × 1 TIFF each). Splitting by cell type lets gc() reclaim handles
+between chunks.
+
+```{r plot-setup}
+source("Area/R/plot_area_all_comparisons.R")
+
+# --- Shared helpers (copied from generate_all_area_plots internals) ---
+split_area_plot <- function(data, cell_col) {
+  area_to_count <- c(ins_area = "Count.ins", glu_area = "Count.glu",
+                     soma_area = "Count.soma", pp_area = "Count.PP")
+  log_col <- paste0("log_", cell_col)
+  count_col <- area_to_count[[cell_col]]
+  data %>% filter(!is.na(!!sym(cell_col)) & !!sym(cell_col) > 0 & !!sym(count_col) > 0) %>%
+    mutate(!!log_col := log(!!sym(cell_col)))
+}
+
+add_object_type <- function(df) {
+  df %>% mutate(object_type = factor(case_when(
+    Islet.Cells == 1 ~ "Singlets",
+    Islet.Cells >= 2 & Islet.Cells <= 14 ~ "SEOs",
+    Islet.Cells >= 15 ~ "Islets"),
+    levels = c("Singlets", "SEOs", "Islets")))
+}
+
+set_factors <- function(df) {
+  df %>% mutate(Diagnosis = factor(Diagnosis, levels = c("ND", "T1D")),
+                Region = factor(Region, levels = c("Head", "Body", "Tail")),
+                Sex = factor(Sex, levels = c("Female", "Male")),
+                Donor = factor(Donor), ImageID = factor(ImageID))
+}
+set_factors_t1d <- function(df) set_factors(df) %>% droplevels()
+
+# Load subset-specific data
+p_singlets     <- set_factors(readRDS("Data/area_data_singlets.rds"))
+p_endobs       <- set_factors(readRDS("Data/area_data_endobs.rds"))
+p_islets       <- set_factors(readRDS("Data/area_data_islets.rds"))
+p_singlets_t1d <- set_factors_t1d(readRDS("Data/area_data_singlets_t1d.rds"))
+p_endobs_t1d   <- set_factors_t1d(readRDS("Data/area_data_endobs_t1d.rds"))
+p_islets_t1d   <- set_factors_t1d(readRDS("Data/area_data_islets_t1d.rds"))
+
+p_beta_comb      <- add_object_type(set_factors(readRDS("Data/area_data_beta_combined.rds")))
+p_alpha_comb     <- add_object_type(set_factors(readRDS("Data/area_data_alpha_combined.rds")))
+p_delta_comb     <- add_object_type(set_factors(readRDS("Data/area_data_delta_combined.rds")))
+p_pp_comb        <- add_object_type(set_factors(readRDS("Data/area_data_pp_combined.rds")))
+p_beta_comb_t1d  <- add_object_type(set_factors_t1d(readRDS("Data/area_data_beta_combined_t1d.rds")))
+p_alpha_comb_t1d <- add_object_type(set_factors_t1d(readRDS("Data/area_data_alpha_combined_t1d.rds")))
+p_delta_comb_t1d <- add_object_type(set_factors_t1d(readRDS("Data/area_data_delta_combined_t1d.rds")))
+p_pp_comb_t1d    <- add_object_type(set_factors_t1d(readRDS("Data/area_data_pp_combined_t1d.rds")))
+
+model_dir  <- "Area/Models/Total_Area"
+output_dir <- "Area/Graphs/total_area"
+
+# Helper to run one cell type end-to-end
+run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, comb_model_name, comb_t1d_name) {
+  cat("\n===", toupper(label), "===\n")
+  
+  for (sz in list(
+    list(tag = "1cell", display = "Singlets", data = split_area_plot(p_singlets, cell_col),
+         model_file = paste0("area_", ct, "_1cell.rds"), has_islet = FALSE),
+    list(tag = "2to14", display = "SEOs", data = split_area_plot(p_endobs, cell_col),
+         model_file = paste0("area_", ct, "_2to14.rds"), has_islet = TRUE),
+    list(tag = "15plus", display = "Islets", data = split_area_plot(p_islets, cell_col),
+         model_file = paste0("area_", ct, "_15plus.rds"), has_islet = TRUE))) {
+    cat("  Diag", sz$tag, "...\n")
+    m <- readRDS(file.path(model_dir, sz$model_file))
+    generate_area_diag_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
+                              area_col, sz$has_islet,
+                              file.path(output_dir, ct, "Diagnosis", sz$tag))
+    rm(m); gc(); closeAllConnections()
+  }
+  
+  cat("  Diag combined...\n")
+  m <- readRDS(file.path(model_dir, paste0(comb_model_name, ".rds")))
+  generate_area_combined_diag_plots(m, split_area_plot(comb_diag, cell_col),
+                                     paste(label, "(combined)"), area_col,
+                                     file.path(output_dir, ct, "Diagnosis", "combined"))
+  rm(m); gc(); closeAllConnections()
+  
+  for (sz in list(
+    list(tag = "1cell", display = "Singlets", data = split_area_plot(p_singlets_t1d, cell_col),
+         model_file = paste0("area_", ct, "_1cell_t1d.rds"), has_islet = FALSE),
+    list(tag = "2to14", display = "SEOs", data = split_area_plot(p_endobs_t1d, cell_col),
+         model_file = paste0("area_", ct, "_2to14_t1d.rds"), has_islet = TRUE),
+    list(tag = "15plus", display = "Islets", data = split_area_plot(p_islets_t1d, cell_col),
+         model_file = paste0("area_", ct, "_15plus_t1d.rds"), has_islet = TRUE))) {
+    cat("  T1D", sz$tag, "...\n")
+    m <- readRDS(file.path(model_dir, sz$model_file))
+    generate_area_t1d_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
+                             area_col, sz$has_islet,
+                             file.path(output_dir, ct, "T1D", sz$tag))
+    rm(m); gc(); closeAllConnections()
+  }
+  
+  cat("  T1D combined...\n")
+  m <- readRDS(file.path(model_dir, paste0(comb_t1d_name, ".rds")))
+  generate_area_combined_t1d_plots(m, split_area_plot(comb_t1d, cell_col),
+                                    paste(label, "(combined)"), area_col,
+                                    file.path(output_dir, ct, "T1D", "combined"))
+  rm(m); gc(); closeAllConnections()
+  
+  cat("  ", label, "COMPLETE\n")
+}
+```
+
+```{r plot-beta}
+run_cell_type("beta", "ins_area", "ins_area", "\u03b2 cell area",
+              p_beta_comb, p_beta_comb_t1d, "beta_combined_model", "beta_combined_t1d")
+gc(); closeAllConnections()
+```
+
+```{r plot-alpha}
+run_cell_type("alpha", "glu_area", "glu_area", "\u03b1 cell area",
+              p_alpha_comb, p_alpha_comb_t1d, "alpha_combined_model", "alpha_combined_t1d")
+gc(); closeAllConnections()
+```
+
+```{r plot-delta}
+run_cell_type("delta", "soma_area", "soma_area", "\u03b4 cell area",
+              p_delta_comb, p_delta_comb_t1d, "delta_combined_model", "delta_combined_t1d")
+gc(); closeAllConnections()
+```
+
+```{r plot-pp}
+run_cell_type("pp", "pp_area", "pp_area", "PP cell area",
+              p_pp_comb, p_pp_comb_t1d, "pp_combined_model", "pp_combined_t1d")
+gc(); closeAllConnections()
+```
+
+```{r}
+sessionInfo()
+```

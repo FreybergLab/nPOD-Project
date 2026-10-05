@@ -1,0 +1,186 @@
+---
+title: "Per_Cell_Area"
+output: html_document
+date: "2026-04-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+
+library(emmeans)
+library(glmmTMB)
+library(dplyr)
+```
+
+```{r load-pc-models}
+# Per-cell area models
+for (f in list.files("Area/Models/Per_Cell_Area", pattern = "\\.rds$", full.names = TRUE)) {
+  assign(tools::file_path_sans_ext(basename(f)), readRDS(f))
+  closeAllConnections()
+}
+
+cat("Loaded", length(list.files("Area/Models/Per_Cell_Area", pattern = "\\.rds$")), "per-cell area models\n")
+```
+
+```{r excel-pc-diag}
+source("Area/R/generate_pc_area_excel_diag.R")
+generate_all_pc_area_excel()
+```
+
+```{r excel-pc-t1d}
+source("Area/R/generate_pc_area_t1d_excel.R")
+generate_all_pc_area_t1d_excel()
+```
+
+# Per-Cell Area Plots — one cell type per chunk
+
+Singlets are skipped throughout — per-cell area is identical to total area
+when count = 1. See Area/Graphs for singlet plots.
+
+```{r pc-plot-setup}
+source("Area/R/plot_pc_area_all_comparisons.R")
+
+# Override y-axis label (already done in the sourced file, but be explicit)
+y_lab_area <- expression(paste("Per-cell area (", mu, "m"^2, "/cell)"))
+
+# --- Shared helpers ---
+area_to_count <- c(ins_area = "Count.ins", glu_area = "Count.glu",
+                   soma_area = "Count.soma", pp_area = "Count.PP")
+
+split_per_cell_plot <- function(data, cell_col) {
+  count_col <- area_to_count[[cell_col]]
+  pc_col <- paste0(cell_col, "_pc")
+  log_col <- paste0("log_", cell_col, "_pc")
+  data %>%
+    filter(!is.na(!!sym(cell_col)) & !!sym(cell_col) > 0 &
+           !!sym(count_col) > 0) %>%
+    mutate(!!pc_col := !!sym(cell_col) / !!sym(count_col),
+           !!log_col := log(!!sym(cell_col) / !!sym(count_col)))
+}
+
+add_object_type <- function(df) {
+  df %>% mutate(object_type = factor(case_when(
+    Islet.Cells == 1 ~ "Singlets",
+    Islet.Cells >= 2 & Islet.Cells <= 14 ~ "SEOs",
+    Islet.Cells >= 15 ~ "Islets"),
+    levels = c("Singlets", "SEOs", "Islets")))
+}
+
+set_factors <- function(df) {
+  df %>% mutate(Diagnosis = factor(Diagnosis, levels = c("ND", "T1D")),
+                Region = factor(Region, levels = c("Head", "Body", "Tail")),
+                Sex = factor(Sex, levels = c("Female", "Male")),
+                Donor = factor(Donor), ImageID = factor(ImageID))
+}
+set_factors_t1d <- function(df) set_factors(df) %>% droplevels()
+
+# Load subset-specific data (no singlets needed for per-cell)
+p_endobs       <- set_factors(readRDS("Data/area_data_endobs.rds"))
+p_islets       <- set_factors(readRDS("Data/area_data_islets.rds"))
+p_endobs_t1d   <- set_factors_t1d(readRDS("Data/area_data_endobs_t1d.rds"))
+p_islets_t1d   <- set_factors_t1d(readRDS("Data/area_data_islets_t1d.rds"))
+
+p_beta_comb      <- add_object_type(set_factors(readRDS("Data/area_data_beta_combined.rds")))
+p_alpha_comb     <- add_object_type(set_factors(readRDS("Data/area_data_alpha_combined.rds")))
+p_delta_comb     <- add_object_type(set_factors(readRDS("Data/area_data_delta_combined.rds")))
+p_pp_comb        <- add_object_type(set_factors(readRDS("Data/area_data_pp_combined.rds")))
+p_beta_comb_t1d  <- add_object_type(set_factors_t1d(readRDS("Data/area_data_beta_combined_t1d.rds")))
+p_alpha_comb_t1d <- add_object_type(set_factors_t1d(readRDS("Data/area_data_alpha_combined_t1d.rds")))
+p_delta_comb_t1d <- add_object_type(set_factors_t1d(readRDS("Data/area_data_delta_combined_t1d.rds")))
+p_pp_comb_t1d    <- add_object_type(set_factors_t1d(readRDS("Data/area_data_pp_combined_t1d.rds")))
+
+model_dir  <- "Area/Models/Per_Cell_Area"
+output_dir <- "Area/Graphs/Per_Cell_Area"
+
+pc_area_cols <- list(
+  beta = "ins_area_pc", alpha = "glu_area_pc",
+  delta = "soma_area_pc", pp = "pp_area_pc"
+)
+
+# Helper to run one cell type end-to-end (no singlets)
+run_pc_cell_type <- function(ct, cell_col, label, comb_diag, comb_t1d) {
+  pc_col <- pc_area_cols[[ct]]
+  cat("\n===", toupper(label), "===\n")
+  cat("  Singlets SKIPPED (per-cell \u2261 total area; see Area/Graphs)\n")
+
+  # --- DIAGNOSIS: SEOs ---
+  cat("  Diag SEOs...\n")
+  d <- split_per_cell_plot(p_endobs, cell_col)
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14.rds")))
+  generate_area_diag_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
+                            file.path(output_dir, ct, "Diagnosis", "2to14"))
+  rm(m); gc(); closeAllConnections()
+
+  # --- DIAGNOSIS: Islets ---
+  cat("  Diag Islets...\n")
+  d <- split_per_cell_plot(p_islets, cell_col)
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus.rds")))
+  generate_area_diag_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
+                            file.path(output_dir, ct, "Diagnosis", "15plus"))
+  rm(m); gc(); closeAllConnections()
+
+  # --- DIAGNOSIS: Combined ---
+  cat("  Diag combined...\n")
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_combined.rds")))
+  d <- split_per_cell_plot(comb_diag, cell_col)
+  generate_area_combined_diag_plots(m, d, paste(label, "(combined)"), pc_col,
+                                     file.path(output_dir, ct, "Diagnosis", "combined"))
+  rm(m); gc(); closeAllConnections()
+
+  # --- T1D: SEOs ---
+  cat("  T1D SEOs...\n")
+  d <- split_per_cell_plot(p_endobs_t1d, cell_col)
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14_t1d.rds")))
+  generate_area_t1d_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
+                           file.path(output_dir, ct, "T1D", "2to14"))
+  rm(m); gc(); closeAllConnections()
+
+  # --- T1D: Islets ---
+  cat("  T1D Islets...\n")
+  d <- split_per_cell_plot(p_islets_t1d, cell_col)
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus_t1d.rds")))
+  generate_area_t1d_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
+                           file.path(output_dir, ct, "T1D", "15plus"))
+  rm(m); gc(); closeAllConnections()
+
+  # --- T1D: Combined ---
+  cat("  T1D combined...\n")
+  m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_combined_t1d.rds")))
+  d <- split_per_cell_plot(comb_t1d, cell_col)
+  generate_area_combined_t1d_plots(m, d, paste(label, "(combined)"), pc_col,
+                                    file.path(output_dir, ct, "T1D", "combined"))
+  rm(m); gc(); closeAllConnections()
+
+  cat("  ", label, "COMPLETE\n")
+}
+```
+
+```{r pc-plot-beta}
+run_pc_cell_type("beta", "ins_area", "\u03b2 per-cell area",
+                  p_beta_comb, p_beta_comb_t1d)
+gc(); closeAllConnections()
+```
+
+```{r pc-plot-alpha}
+run_pc_cell_type("alpha", "glu_area", "\u03b1 per-cell area",
+                  p_alpha_comb, p_alpha_comb_t1d)
+gc(); closeAllConnections()
+```
+
+```{r pc-plot-delta}
+run_pc_cell_type("delta", "soma_area", "\u03b4 per-cell area",
+                  p_delta_comb, p_delta_comb_t1d)
+gc(); closeAllConnections()
+```
+
+```{r pc-plot-pp}
+run_pc_cell_type("pp", "pp_area", "PP per-cell area",
+                  p_pp_comb, p_pp_comb_t1d)
+gc(); closeAllConnections()
+```
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,79 @@
+---
+title: "Density analysis"
+output: html_document
+date: "2026-03-22"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(glmmTMB)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r}
+density_dataset  <- readRDS("Data/density_data.rds")
+density_t1d <- readRDS("Data/density_data_t1d.rds")
+
+density_diag      <- readRDS("Density/Models/density_diag.rds")
+density_t1d_model <- readRDS("Density/Models/density_t1d.rds")
+density_spline    <- readRDS("Density/Models/density_spline.rds")
+```
+
+```{r}
+length(unique(density_dataset$Donor))
+density_dataset %>% count(Donor, Diagnosis)
+
+density_dataset_6348 <- density_dataset %>%
+  filter(Donor == 6348)
+
+# 1. Likelihood ratio test: spline vs linear
+# This is your headline test for "does duration matter?"
+density_linear <- glmmTMB(islet_density ~ Disease.Duration_c + Age_c + Sex + Region + 
+                          (1|Donor), 
+                          family = Gamma(link = "log"), 
+                          data = density_t1d)
+
+density_null <- glmmTMB(islet_density ~ Age_c + Sex + Region + 
+                        (1|Donor), 
+                        family = Gamma(link = "log"), 
+                        data = density_t1d)
+
+# Test: does adding the spline improve over null (no duration term)?
+anova(density_null, density_spline)
+
+# Test: does the spline improve over linear?
+anova(density_linear, density_spline)
+
+# 2. Get the spline term's overall significance via Wald
+# (joint test of all spline basis terms)
+car::Anova(density_spline, type = 3)
+
+```
+
+
+```{r}
+source("Density/R/plot_density_main_figure.R")
+main <- generate_main_figure(density_dataset, density_t1d,
+                              density_diag, density_spline, density_t1d_model)
+
+source("Density/R/plot_density_supp_figure.R")
+supp <- generate_supp_figure(density_dataset, density_diag)
+```
+
+```{r}
+source("Density/R/plot_density_all_comparisons.R")
+generate_all_density_plots()
+```
+
+```{r}
+source("Density/R/generate_density_excel.R")
+generate_all_density_excel()
+```
+
+```{r}
+sessionInfo()
+```
+

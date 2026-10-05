@@ -1,0 +1,22 @@
+---
+title: "Count_analysis"
+output: html_document
+date: "2026-03-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r}
+source("Count/R/generate_count_excel.R")
+generate_all_count_excel()
+```
+
+```{r}
+source("Count/R/plot_count_all_comparisons.R")
+generate_all_count_plots()
+```
+

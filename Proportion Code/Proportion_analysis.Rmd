@@ -1,0 +1,121 @@
+---
+title: "Proportion_analysis"
+output: html_document
+date: "2026-03-24"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r}
+source("Proportion/R/generate_diag_excel_results.R")
+generate_diag_excel()
+```
+
+```{r}
+source("Proportion/R/generate_proportion_t1d_excel.R")
+generate_all_proportion_t1d_excel()
+```
+
+```{r}
+source("Proportion/R/plot_celltype_main_figures.R")
+
+quad_data <- readRDS('Data/quad_data.rds') %>%
+  mutate(Region = factor(Region, levels = c('Head','Body','Tail')),
+         Sex = factor(Sex, levels = c('Female','Male')),
+         Diagnosis = factor(Diagnosis, levels = c('ND','T1D')),
+         Donor = factor(Donor), ImageID = factor(ImageID)) 
+
+figures <- generate_main_3way_figures(quad_data)
+```
+
+```{r}
+source("Proportion/R/plot_celltype_onset_figures.R")
+
+  # Load T1D-only proportion models individually
+onset_models <- list(
+  beta  = readRDS('Proportion/Models/ins_ao_model.rds'),
+  alpha = readRDS('Proportion/Models/glu_ao_model.rds'),
+  delta = readRDS('Proportion/Models/soma_ao_model.rds'),
+  pp    = readRDS('Proportion/Models/pp_ao_model.rds')
+)
+  
+  # Prepare T1D data
+t1d_data <- readRDS('Data/quad_data_t1d.rds') %>%
+  mutate(Region = factor(Region, levels = c('Head','Body','Tail')),
+         Sex = factor(Sex, levels = c('Female','Male')),
+         Donor = factor(Donor), ImageID = factor(ImageID)) %>%
+  droplevels()
+  
+figures <- generate_onset_figures(t1d_data, onset_models)
+```
+
+```{r}
+source("Proportion/R/plot_celltype_supplementary_figures_no_stars.R")
+figures <- generate_supplementary_figures(quad_data)
+```
+
+```{r}
+source("Proportion/R/plot_proportion_all_comparisons.R")
+generate_all_proportion_plots()
+```
+
+```{r}
+quad_data <- readRDS('Data/quad_data.rds') %>%
+  mutate(Region = factor(Region, levels = c('Head','Body','Tail')),
+         Sex = factor(Sex, levels = c('Female','Male')),
+         Diagnosis = factor(Diagnosis, levels = c('ND','T1D')),
+         Donor = factor(Donor), ImageID = factor(ImageID)) 
+
+names(quad_data)
+
+# 1. One mean β-cell % per donor — unweighted mean of that donor's islets,
+#    matching the per-donor points in Fig 7E.
+donor_beta <- quad_data %>%
+  group_by(Diagnosis, Donor) %>%
+  summarise(beta_pct = mean(Percent.ins, na.rm = TRUE),
+            n_islets = n(),
+            .groups  = "drop")
+
+# 2. ND reference interval, built from the ND donor means.
+nd <- donor_beta %>% filter(Diagnosis == "ND") %>% pull(beta_pct)
+
+nd_ref <- list(
+  mean   = mean(nd),
+  ci95   = mean(nd) + c(-1, 1) * qt(.975, length(nd) - 1) * sd(nd) / sqrt(length(nd)), # 95% CI of the ND mean (your stated choice)
+  pctl95 = quantile(nd, c(.025, .975)),   # central 95% of the ND donor spread
+  range  = range(nd)                      # full observed ND range
+)
+nd_ref
+
+# 3. Count the T1D donors that reach the ND range.
+t1d <- donor_beta %>% filter(Diagnosis == "T1D")
+
+lower_bound <- nd_ref$ci95[1]             # bottom of the ND mean's 95% CI
+
+t1d_in_range <- t1d %>% filter(beta_pct >= lower_bound)   # "at or above the bottom of the ND range"
+# strictly inside instead:  filter(beta_pct >= nd_ref$ci95[1] & beta_pct <= nd_ref$ci95[2])
+
+nrow(t1d_in_range)   # -> the N for "[N] of XX T1D donors"
+nrow(t1d)            # -> denominator (settles 34 vs 35)
+lapply(nd_ref, function(x) round(x * 100, 1))   # ND reference in %
+print(t1d_in_range %>% mutate(beta_pct = round(beta_pct * 100, 1)))
+
+print(t1d %>%
+  left_join(
+    quad_data %>% group_by(Donor) %>%
+      summarise(Disease.Duration = first(Disease.Duration),
+                age_at_onset = first(age_at_onset), .groups = "drop"),
+    by = "Donor") %>%
+  arrange(desc(beta_pct)) %>%
+  mutate(in_ND_range = beta_pct >= lower_bound))
+```
+
+```{r}
+sessioinInfo()
+```
+

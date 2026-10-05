@@ -1,0 +1,341 @@
+---
+title: "Can survivor selection explain the alpha-cell shift?"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+## The test
+
+If T1D islets are simply the alpha-rich survivors of a formerly ND-like
+population, then selection has only removed islets. It cannot have created any,
+and it certainly cannot have created alpha-rich ones. So for every level of
+alpha fraction *a*:
+
+```
+islets per mm² at alpha fraction a, in T1D   <=   the same quantity in ND
+```
+
+**Any bin where T1D density exceeds ND density falsifies pure survivor
+selection.** No distributional assumptions, no model. The same inequality
+applies to alpha cells per mm² of tissue.
+
+Comparing distribution *shapes* is the weaker version of this. The density
+inequality is what can actually settle it, and it needs both composition
+(`ratio_data`) and a tissue denominator (`density_data`) — which you already
+have.
+
+## What this can and cannot establish
+
+It can **falsify pure survivor selection**. It cannot confirm
+transdifferentiation: ruling out one non-proliferative mechanism leaves the
+others (transdifferentiation, reduced alpha-cell turnover) undistinguished.
+Nor can it rule out selection acting *partially* alongside another mechanism.
+
+Four caveats that belong in any write-up of this:
+
+1. **Islet detection is composition-dependent.** An islet that lost its beta
+   cells may fall below the `Islet.Cells >= 15` threshold and vanish from the
+   dataset — a selection effect created by the pipeline, not by biology. This
+   works *against* finding a violation, so a violation is still informative. The
+   sensitivity chunk repeats everything on `no_cutoff_data` (`Islet.Cells > 0`).
+2. **The tissue denominator can move.** `full_tissue_area` is classified minus
+   duct minus glass. Exocrine atrophy in T1D would shrink it and inflate every
+   T1D density. Checked directly below.
+3. **Two-dimensional sections**, so these are areal densities, not volumetric.
+4. **Cross-sectional.** No islet is observed before and after.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+
+N_BINS <- 10          # alpha-fraction bins for the density inequality
+USE_NO_CUTOFF <- TRUE # also run everything without the Islet.Cells >= 15 filter
+```
+
+```{r load}
+read_any <- function(stem) {
+  for (p in sprintf("Data/%s.%s", stem, c("rds", "csv"))) {
+    if (file.exists(p)) return(if (grepl("rds$", p)) readRDS(p)
+                               else readr::read_csv(p, show_col_types = FALSE))
+  }
+  stop("cannot find Data/", stem, ".rds or .csv")
+}
+
+# ratio_data already excludes Single-stain images (where Count.glu is
+# structurally 0) and donor 6473, so alpha fraction is well defined on it.
+ratio_data <- read_any("ratio_data")
+density    <- read_any("density_data")
+
+norm_img <- function(x) as.character(suppressWarnings(as.numeric(as.character(x))))
+
+prep_comp <- function(df) {
+  df %>%
+    mutate(Diagnosis  = factor(Diagnosis, levels = c("ND", "T1D")),
+           Donor      = as.character(Donor),
+           ImageID    = norm_img(ImageID),
+           alpha_frac = Count.glu / (Count.ins + Count.glu)) %>%
+    filter(is.finite(alpha_frac))
+}
+
+comp <- prep_comp(ratio_data)
+dens <- density %>%
+  mutate(Donor = as.character(Donor), ImageID = norm_img(ImageID)) %>%
+  dplyr::select(Donor, ImageID, full_tissue_area) %>%
+  distinct()
+
+cat(sprintf("composition: %d islets, %d donors\n", nrow(comp),
+            dplyr::n_distinct(comp$Donor)))
+matched <- comp %>% semi_join(dens, by = c("Donor", "ImageID"))
+cat(sprintf("with a tissue-area denominator: %d islets (%.1f%%), %d donors\n",
+            nrow(matched), 100 * nrow(matched) / nrow(comp),
+            dplyr::n_distinct(matched$Donor)))
+if (nrow(matched) < 0.8 * nrow(comp)) {
+  cat("WARNING: many islets have no matching image in density_data - check the\n")
+  cat("ImageID join before trusting the density tests.\n")
+}
+```
+
+# Caveat 2 first: does the denominator move?
+
+```{r tissue-area}
+# If full_tissue_area is systematically smaller in T1D, every T1D density is
+# inflated and a violation could be an artefact. Check before anything else.
+ta <- comp %>%
+  distinct(Donor, Diagnosis, ImageID) %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  group_by(Donor, Diagnosis) %>%
+  summarise(mean_area = mean(full_tissue_area), images = n(), .groups = "drop")
+
+print(as.data.frame(ta %>% group_by(Diagnosis) %>%
+  summarise(donors = n(), median_area = median(mean_area),
+            q25 = quantile(mean_area, .25), q75 = quantile(mean_area, .75),
+            .groups = "drop")), digits = 4)
+cat(sprintf("\nWilcoxon on donor means: p = %.4f\n",
+            suppressWarnings(wilcox.test(mean_area ~ Diagnosis, data = ta)$p.value)))
+cat("A large difference here means the density comparisons need the areal\n")
+cat("denominator reported alongside, not just the ratio.\n")
+```
+
+# Test 1: distributions and overlap
+
+```{r overlap}
+cat("=== alpha fraction by diagnosis ===\n")
+print(as.data.frame(comp %>% group_by(Diagnosis) %>%
+  summarise(islets = n(), donors = dplyr::n_distinct(Donor),
+            mean = mean(alpha_frac), median = median(alpha_frac),
+            q10 = quantile(alpha_frac, .10), q25 = quantile(alpha_frac, .25),
+            q75 = quantile(alpha_frac, .75), q90 = quantile(alpha_frac, .90),
+            .groups = "drop")), digits = 3)
+
+nd <- comp$alpha_frac[comp$Diagnosis == "ND"]
+t1 <- comp$alpha_frac[comp$Diagnosis == "T1D"]
+
+thr <- median(t1)
+cat(sprintf("\nmedian T1D alpha fraction: %.3f\n", thr))
+cat(sprintf("ND islets at or above it: %.2f%% (%d of %d)\n",
+            100 * mean(nd >= thr), sum(nd >= thr), length(nd)))
+cat(sprintf("T1D islets inside the ND 10-90%% range [%.3f, %.3f]: %.1f%%\n",
+            quantile(nd, .10), quantile(nd, .90),
+            100 * mean(t1 >= quantile(nd, .10) & t1 <= quantile(nd, .90))))
+cat("\nIf only a small fraction of ND islets are as alpha-rich as the typical\n")
+cat("T1D islet, pure selection requires destroying almost everything else -\n")
+cat("which Test 2 checks against the observed islet density.\n")
+```
+
+# Test 2: the density inequality
+
+```{r density-inequality}
+# Islets per mm2 in each alpha-fraction bin, by diagnosis. Under pure survivor
+# selection T1D must be <= ND in EVERY bin.
+bin_edges <- seq(0, 1, length.out = N_BINS + 1)
+
+# Tissue area is recorded per image, so a donor's area is the sum over the
+# images that actually contributed islets.
+donor_area <- comp %>%
+  distinct(Donor, Diagnosis, ImageID) %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  group_by(Donor, Diagnosis) %>%
+  summarise(area_mm2 = sum(full_tissue_area), .groups = "drop")
+
+counts_by_bin <- comp %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  mutate(bin = cut(alpha_frac, bin_edges, include.lowest = TRUE)) %>%
+  count(Donor, Diagnosis, bin, name = "n_islets") %>%
+  complete(nesting(Donor, Diagnosis), bin, fill = list(n_islets = 0)) %>%
+  inner_join(donor_area, by = c("Donor", "Diagnosis")) %>%
+  mutate(islets_per_mm2 = n_islets / area_mm2)
+
+# Donor is the unit: mean of donor densities, not pooled islets over pooled area.
+ineq <- counts_by_bin %>%
+  group_by(Diagnosis, bin) %>%
+  summarise(donors = n(), mean_density = mean(islets_per_mm2), .groups = "drop") %>%
+  pivot_wider(names_from = Diagnosis, values_from = c(donors, mean_density)) %>%
+  mutate(ratio_T1D_over_ND = mean_density_T1D / mean_density_ND,
+         violates = mean_density_T1D > mean_density_ND)
+
+cat("=== islets per mm2 by alpha-fraction bin ===\n")
+cat("Under pure survivor selection every ratio must be <= 1.\n\n")
+print(as.data.frame(ineq), digits = 4)
+
+# A bin where ND density is exactly 0 but T1D is positive gives ratio = Inf.
+# That is the strongest form of falsification: islets of that composition do not
+# exist in ND at all, so they cannot be ND survivors.
+empty_nd <- sum(ineq$mean_density_ND == 0 & ineq$mean_density_T1D > 0, na.rm = TRUE)
+if (empty_nd > 0) {
+  cat(sprintf("\n%d bin(s) have NO ND islets but do have T1D islets - those\n",
+              empty_nd))
+  cat("compositions do not occur in ND at any density.\n")
+}
+
+nv <- sum(ineq$violates, na.rm = TRUE)
+cat(sprintf("\nbins where T1D density EXCEEDS ND: %d of %d\n", nv, nrow(ineq)))
+if (nv > 0) {
+  cat("=> pure survivor selection is falsified. Islets of that composition are\n")
+  cat("   more common per unit tissue in T1D than they ever were in ND, so they\n")
+  cat("   cannot be a surviving subset of the ND population.\n")
+  cat("   Largest excess:\n")
+  print(as.data.frame(ineq %>% filter(violates) %>%
+    arrange(desc(ratio_T1D_over_ND)) %>% head(3)), digits = 4)
+} else {
+  cat("=> no violation; selection remains viable on this test. Check whether the\n")
+  cat("   overall islet density drop in Test 3 is large enough to supply the\n")
+  cat("   T1D population from the ND alpha-rich tail.\n")
+}
+
+# Monotonicity: the density ratio is proportional to P(survive | alpha fraction),
+# which should be non-decreasing if alpha-richness is what protects an islet.
+r <- ineq$ratio_T1D_over_ND
+r <- r[is.finite(r)]
+cat(sprintf("\nratio monotone non-decreasing across bins: %s\n",
+            all(diff(r) >= 0)))
+cat("Non-monotone means no single survival-probability function of alpha\n")
+cat("fraction can map the ND distribution onto the T1D one.\n")
+```
+
+# Test 3: absolute cell burden per mm²
+
+```{r burden}
+# Alpha cells per mm2 of tissue cannot increase under pure selection.
+burden <- comp %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  group_by(Donor, Diagnosis) %>%
+  summarise(islets = n(), alpha = sum(Count.glu), beta = sum(Count.ins),
+            endocrine = sum(Count.ins + Count.glu), .groups = "drop") %>%
+  inner_join(donor_area, by = c("Donor", "Diagnosis")) %>%
+  mutate(islets_per_mm2 = islets / area_mm2,
+         alpha_per_mm2  = alpha / area_mm2,
+         beta_per_mm2   = beta / area_mm2,
+         endo_per_mm2   = endocrine / area_mm2)
+
+summ <- burden %>% group_by(Diagnosis) %>%
+  summarise(donors = n(),
+            across(c(islets_per_mm2, alpha_per_mm2, beta_per_mm2, endo_per_mm2),
+                   median), .groups = "drop")
+cat("=== per mm2 of tissue, donor medians ===\n")
+print(as.data.frame(summ), digits = 4)
+
+folds <- summ %>%
+  pivot_longer(-c(Diagnosis, donors)) %>%
+  pivot_wider(names_from = Diagnosis, values_from = value) %>%
+  mutate(fold_T1D_over_ND = T1D / ND)
+cat("\n")
+print(as.data.frame(folds %>% dplyr::select(name, ND, T1D, fold_T1D_over_ND)), digits = 4)
+
+for (v in c("alpha_per_mm2", "islets_per_mm2", "beta_per_mm2")) {
+  a <- burden[[v]][burden$Diagnosis == "T1D"]
+  b <- burden[[v]][burden$Diagnosis == "ND"]
+  p <- suppressWarnings(wilcox.test(a, b)$p.value)
+  cat(sprintf("%-16s ND %.4f vs T1D %.4f, Wilcoxon p = %.4g\n",
+              v, median(b), median(a), p))
+}
+cat("\nalpha_per_mm2 fold > 1 => alpha cells were CREATED, not merely revealed\n")
+cat("by the loss of beta cells. That is incompatible with pure selection and\n")
+cat("is the single most direct evidence on the question.\n")
+```
+
+# Test 4: are alpha-rich ND islets like T1D islets?
+
+```{r matched}
+# If T1D islets are surviving alpha-rich ND islets, then ND islets in the T1D
+# composition range should resemble them in size and absolute cell counts.
+lo <- quantile(t1, .25); hi <- quantile(t1, .75)
+cat(sprintf("matching on alpha fraction in the T1D IQR [%.3f, %.3f]\n\n", lo, hi))
+
+mt <- comp %>%
+  filter(alpha_frac >= lo, alpha_frac <= hi) %>%
+  group_by(Diagnosis) %>%
+  summarise(islets = n(), donors = dplyr::n_distinct(Donor),
+            median_total = median(Count.ins + Count.glu),
+            median_alpha = median(Count.glu),
+            median_beta  = median(Count.ins),
+            mean_total = mean(Count.ins + Count.glu),
+            mean_alpha = mean(Count.glu), .groups = "drop")
+print(as.data.frame(mt), digits = 4)
+cat("\nIf the ND row has far fewer cells than the T1D row, the alpha-rich ND\n")
+cat("islets are small ones and cannot be the origin of full-sized T1D islets.\n")
+```
+
+# Test 5: does composition track disease duration?
+
+```{r duration}
+# Selection at diagnosis is a one-off: alpha fraction should be flat across
+# duration. Progressive conversion predicts a gradient.
+t1d_only <- comp %>% filter(Diagnosis == "T1D")
+if ("Disease.Duration" %in% names(t1d_only)) {
+  dd <- t1d_only %>%
+    group_by(Donor, Disease.Duration) %>%
+    summarise(alpha_frac = mean(alpha_frac), islets = n(), .groups = "drop")
+  print(as.data.frame(dd %>% arrange(Disease.Duration)), digits = 3)
+  ct <- suppressWarnings(cor.test(dd$Disease.Duration, dd$alpha_frac,
+                                  method = "spearman"))
+  cat(sprintf("\nSpearman across %d T1D donors: rho = %.3f, p = %.4f\n",
+              nrow(dd), ct$estimate, ct$p.value))
+  cat("Flat is consistent with a one-off event at diagnosis; a positive\n")
+  cat("gradient is consistent with progressive conversion.\n")
+} else {
+  cat("Disease.Duration not present in ratio_data\n")
+}
+```
+
+# Sensitivity: without the size threshold
+
+```{r sensitivity, eval = USE_NO_CUTOFF}
+# The Islet.Cells >= 15 filter can delete islets that shrank below it, which is
+# selection imposed by the pipeline. Repeat the two decisive tests on
+# no_cutoff_data (Islet.Cells > 0), excluding Single-stain rows so Count.glu is
+# meaningful.
+nc <- read_any("no_cutoff_data") %>%
+  filter(Stain != "Single", !is.na(Stain)) %>%
+  prep_comp()
+
+nc_area <- nc %>% distinct(Donor, Diagnosis, ImageID) %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  group_by(Donor, Diagnosis) %>%
+  summarise(area_mm2 = sum(full_tissue_area), .groups = "drop")
+
+nc_burden <- nc %>%
+  inner_join(dens, by = c("Donor", "ImageID")) %>%
+  group_by(Donor, Diagnosis) %>%
+  summarise(islets = n(), alpha = sum(Count.glu), beta = sum(Count.ins),
+            .groups = "drop") %>%
+  inner_join(nc_area, by = c("Donor", "Diagnosis")) %>%
+  mutate(islets_per_mm2 = islets / area_mm2,
+         alpha_per_mm2 = alpha / area_mm2, beta_per_mm2 = beta / area_mm2)
+
+cat("=== no size threshold: per mm2, donor medians ===\n")
+print(as.data.frame(nc_burden %>% group_by(Diagnosis) %>%
+  summarise(donors = n(), across(ends_with("per_mm2"), median), .groups = "drop")),
+  digits = 4)
+cat(sprintf("\nalpha_per_mm2 Wilcoxon p = %.4g\n",
+            suppressWarnings(wilcox.test(
+              nc_burden$alpha_per_mm2[nc_burden$Diagnosis == "T1D"],
+              nc_burden$alpha_per_mm2[nc_burden$Diagnosis == "ND"])$p.value)))
+cat("Agreement with Test 3 means the conclusion is not an artefact of the\n")
+cat("size threshold.\n")
+```
+
+```{r save}
+write_csv(ineq, "selection_density_inequality.csv")
+write_csv(burden, "selection_burden_per_donor.csv")
+cat("\nSaved selection_density_inequality.csv and selection_burden_per_donor.csv\n")
+```

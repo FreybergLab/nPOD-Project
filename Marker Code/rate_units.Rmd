@@ -1,0 +1,226 @@
+---
+title: "Rate models in original units"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+Turns the six rate models into numbers you can put in a sentence:
+
+- **% of cells positive** — the rate itself, per 100 cells of the relevant type
+- **marker+ cells per islet** — the same fit converted back to counts
+- **observed values alongside**, computed on each model's own subset
+
+Run after `rate_models.Rmd` in the same session.
+
+**This also fixes a bug in that file.** Its `crude_fold_rate` column was computed
+on the full dataset while the models were fitted to the restricted subsets. For
+the acinar bins that is a 35% difference in islets, and the crude numerator was
+counting marker-positive cells from islets where the denominator was zero —
+cells with no denominator at all, which is not a rate. Everything below uses the
+model's own subset.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(glmmTMB)
+
+PER <- 100          # report per 100 cells, i.e. as a percentage
+MARKERS <- c("ki67", "cd3")
+BINS <- tibble(
+  bin = c("ins", "glu", "aci"),
+  num = c("insulin_cells", "glucagon_cells", "acinar_cells"),
+  den = c("Count.ins", "Count.glu", "Count.Acinar"),
+  cell = c("beta", "alpha", "acinar")
+)
+```
+
+```{r collect}
+# Rebuild the subsets if this is a fresh session; reuse them if not.
+if (!exists("subsets")) {
+  subsets <- list()
+  for (tag in MARKERS) {
+    d <- get(paste0(tag, "_data"))
+    for (i in seq_len(nrow(BINS))) {
+      keep <- !is.na(d[[BINS$den[i]]]) & d[[BINS$den[i]]] > 0
+      subsets[[paste0(tag, "_", BINS$bin[i])]] <- droplevels(d[keep, , drop = FALSE])
+    }
+  }
+}
+
+spec <- bind_rows(lapply(MARKERS, function(tag)
+  BINS %>% mutate(marker = tag, key = paste0(tag, "_", bin),
+                  model = paste0(key, "_rate"))))
+
+missing <- spec$model[!vapply(spec$model, exists, logical(1))]
+if (length(missing)) stop("model objects not found: ", paste(missing, collapse = ", "),
+                          "\n  run rate_models.Rmd first")
+```
+
+# Model-predicted rates
+
+```{r predicted-rates}
+# The offset is offset(log(denominator)). Setting the denominator to 100 in the
+# prediction grid makes the offset log(100), so predict(type = "response")
+# returns the expected number of marker+ cells PER 100 CELLS - i.e. a percentage
+# directly. type = "response" also includes the zero-inflation component, so
+# this is the marginal rate, not the conditional one.
+predict_rate <- function(m, sub, den, per = PER, by_region = FALSE) {
+  vars <- all.vars(formula(m))
+  resp <- vars[1]
+
+  grid <- expand.grid(
+    Diagnosis = levels(sub$Diagnosis),
+    Region = if (by_region) levels(sub$Region) else levels(sub$Region)[1],
+    stringsAsFactors = FALSE, KEEP.OUT.ATTRS = FALSE)
+
+  grid$Sex   <- levels(sub$Sex)[1]     # Female
+  grid$Age_c <- 0                       # sample mean
+  if ("log_Islet.Cells_c" %in% vars) grid$log_Islet.Cells_c <- 0
+  grid[[den]]  <- per                   # <- makes the prediction a rate per `per`
+  grid[[resp]] <- 0                     # placeholder; unused for prediction
+  grid$Donor   <- levels(sub$Donor)[1]  # placeholder; re.form = NA ignores it
+  grid$ImageID <- levels(sub$ImageID)[1]
+  for (v in c("Diagnosis", "Region", "Sex")) {
+    grid[[v]] <- factor(grid[[v]], levels = levels(sub[[v]]))
+  }
+
+  pr  <- predict(m, newdata = grid, type = "response", se.fit = TRUE,
+                 re.form = NA, allow.new.levels = TRUE)
+  fit <- as.numeric(pr$fit); se <- as.numeric(pr$se.fit)
+  rel <- se / fit   # CI formed on the log scale so it cannot go negative
+
+  tibble(Diagnosis = as.character(grid$Diagnosis),
+         Region    = as.character(grid$Region),
+         rate_pct  = fit,
+         lwr_pct   = fit * exp(-1.96 * rel),
+         upr_pct   = fit * exp(1.96 * rel))
+}
+
+# Observed rate on the SAME subset the model used.
+observed_rate <- function(sub, num, den, per = PER) {
+  sub %>%
+    group_by(Diagnosis) %>%
+    summarise(islets = n(), donors = dplyr::n_distinct(Donor),
+              obs_rate_pct = per * sum(.data[[num]]) / sum(.data[[den]]),
+              obs_cells_per_islet = mean(.data[[num]]),
+              mean_denominator = mean(.data[[den]]),
+              .groups = "drop") %>%
+    mutate(Diagnosis = as.character(Diagnosis))
+}
+
+units_tab <- bind_rows(lapply(seq_len(nrow(spec)), function(k) {
+  s <- spec[k, ]
+  m <- get(s$model); sub <- subsets[[s$key]]
+  predict_rate(m, sub, s$den) %>%
+    left_join(observed_rate(sub, s$num, s$den), by = "Diagnosis") %>%
+    mutate(marker = s$marker, cell = s$cell, model = s$model, .before = 1)
+}))
+
+cat("=== % of cells that are marker-positive ===\n")
+cat("Region = Head, Sex = Female, mean Age. Includes the zero-inflation component.\n\n")
+print(as.data.frame(units_tab %>%
+  dplyr::select(marker, cell, Diagnosis, rate_pct, lwr_pct, upr_pct,
+                obs_rate_pct, islets, donors)), digits = 3)
+```
+
+```{r effect-sizes}
+# Same fit expressed three ways: as a percentage in each group, as the
+# difference in percentage points, and as a ratio.
+eff <- units_tab %>%
+  dplyr::select(marker, cell, model, Diagnosis, rate_pct, obs_rate_pct,
+                obs_cells_per_islet, mean_denominator) %>%
+  pivot_wider(names_from = Diagnosis,
+              values_from = c(rate_pct, obs_rate_pct, obs_cells_per_islet,
+                              mean_denominator)) %>%
+  mutate(
+    pct_ND        = rate_pct_ND,
+    pct_T1D       = rate_pct_T1D,
+    diff_pp       = rate_pct_T1D - rate_pct_ND,
+    ratio         = rate_pct_T1D / rate_pct_ND,
+    # Reconciles the rate with the raw per-islet counts: rate x cells available.
+    pred_per_islet_ND  = rate_pct_ND  / 100 * mean_denominator_ND,
+    pred_per_islet_T1D = rate_pct_T1D / 100 * mean_denominator_T1D,
+    obs_per_islet_ND   = obs_cells_per_islet_ND,
+    obs_per_islet_T1D  = obs_cells_per_islet_T1D) %>%
+  dplyr::select(marker, cell, pct_ND, pct_T1D, diff_pp, ratio,
+                pred_per_islet_ND, obs_per_islet_ND,
+                pred_per_islet_T1D, obs_per_islet_T1D)
+
+cat("=== effect in original units ===\n")
+cat("diff_pp is percentage points; ratio is the marginal rate ratio.\n")
+cat("The per-islet columns convert the rate back to counts using each group's\n")
+cat("mean cell count - pred vs obs should agree closely, and a gap means the\n")
+cat("reference-level prediction is not representative of the group average.\n\n")
+print(as.data.frame(eff), digits = 3)
+```
+
+```{r ratio-ci}
+# Marginal rate ratio with a confidence interval. predict() gives correct CIs
+# for each group's rate, but the two are correlated, so the ratio needs a joint
+# calculation. emmeans does this properly; the conditional-component ratio from
+# the coefficient table is the fallback and was within ~7% of the marginal in
+# every model here.
+ratio_ci <- function(m, sub, den, per = PER) {
+  out <- tryCatch({
+    at <- list(Age_c = 0)
+    if ("log_Islet.Cells_c" %in% all.vars(formula(m))) at$log_Islet.Cells_c <- 0
+    emm <- emmeans::emmeans(m, ~ Diagnosis, at = at, data = sub,
+                            offset = log(per), component = "response")
+    ct  <- as.data.frame(emmeans::contrast(emmeans::regrid(emm, transform = "log"),
+                                           "revpairwise", type = "response"))
+    tibble(source = "emmeans (marginal)", ratio = ct$ratio[1],
+           lwr = ct$asymp.LCL[1], upr = ct$asymp.UCL[1], p = ct$p.value[1])
+  }, error = function(e) NULL)
+
+  if (is.null(out)) {
+    co <- summary(m)$coefficients$cond
+    e <- co["DiagnosisT1D", "Estimate"]; s <- co["DiagnosisT1D", "Std. Error"]
+    out <- tibble(source = "coef table (conditional)", ratio = exp(e),
+                  lwr = exp(e - 1.96 * s), upr = exp(e + 1.96 * s),
+                  p = co["DiagnosisT1D", "Pr(>|z|)"])
+  }
+  out
+}
+
+if (requireNamespace("emmeans", quietly = TRUE)) {
+  cat("=== rate ratio with CI ===\n\n")
+  print(as.data.frame(bind_rows(lapply(seq_len(nrow(spec)), function(k) {
+    s <- spec[k, ]
+    ratio_ci(get(s$model), subsets[[s$key]], s$den) %>%
+      mutate(marker = s$marker, cell = s$cell, .before = 1)
+  }))), digits = 4)
+} else {
+  cat("install.packages('emmeans') for marginal ratio CIs\n")
+}
+```
+
+```{r sentences}
+# Draft wording, so the numbers and the claim cannot drift apart.
+cat("=== draft sentences ===\n\n")
+for (k in seq_len(nrow(eff))) {
+  e <- eff[k, ]
+  dir <- if (e$ratio < 1) "lower" else "higher"
+  cat(sprintf(
+    "%s / %s cells: %.2f%% of %s cells positive in ND vs %.2f%% in T1D\n",
+    e$marker, e$cell, e$pct_ND, e$cell, e$pct_T1D))
+  cat(sprintf(
+    "   %.2f-fold %s in T1D (%.2f percentage points); per islet %.3f -> %.3f cells\n\n",
+    if (e$ratio < 1) 1 / e$ratio else e$ratio, dir, e$diff_pp,
+    e$obs_per_islet_ND, e$obs_per_islet_T1D))
+}
+cat("Report the CI and p from the ratio table above, not from these lines.\n")
+cat("For the beta-cell rows, add the restriction: the estimate covers donors\n")
+cat("with residual beta mass. Four Ki-67 and six CD3 T1D donors had no\n")
+cat("insulin+ cells anywhere and are excluded by the offset.\n")
+```
+
+```{r save}
+write_csv(units_tab, "rate_models_units.csv")
+write_csv(eff, "rate_models_effects.csv")
+cat("\nSaved rate_models_units.csv and rate_models_effects.csv\n")
+```
+
+```{r}
+sessionInfo()
+```
+

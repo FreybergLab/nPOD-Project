@@ -1,0 +1,426 @@
+---
+title: "Per-cell rate models (negative binomial with denominator offset)"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+Six models. Outcome is the marker-positive count in a bin; the count of cells
+that could have been positive enters as `offset(log(denominator))`, so the
+coefficients are **rate ratios per cell of that type**.
+
+| model | outcome | offset |
+|---|---|---|
+| `ki67_ins_rate` | `insulin_cells` | `log(Count.ins)` |
+| `ki67_glu_rate` | `glucagon_cells` | `log(Count.glu)` |
+| `ki67_aci_rate` | `acinar_cells` | `log(Count.Acinar)` |
+| `cd3_ins_rate` | `insulin_cells` | `log(Count.ins)` |
+| `cd3_glu_rate` | `glucagon_cells` | `log(Count.glu)` |
+| `cd3_aci_rate` | `acinar_cells` | `log(Count.Acinar)` |
+
+## One term is removed from the formula, deliberately
+
+The primary models use
+
+```
+(Diagnosis + Region + Sex + Age_c)^2 + Diagnosis:Region:Age_c
+```
+
+which is your formula with `log_Islet.Cells_c` and its interactions dropped.
+Two reasons, and the second is the important one.
+
+**It is no longer the exposure.** In the count models `log_Islet.Cells_c`
+carried the "bigger islets have more cells" scaling. The offset now does that
+job, and does it for the *relevant* cell type rather than the total.
+
+**Keeping it would condition away the exposure of interest.** With
+`log(Count.ins)` in the offset and `log(Islet.Cells)` as a covariate, the model
+conditions on both the beta-cell count and the total — that is, on the beta-cell
+*fraction*. But the beta fraction is 77% in ND and 22% in T1D. Those
+distributions barely overlap, so a Diagnosis contrast holding fraction fixed is
+estimated almost entirely by extrapolation. That is a positivity violation, and
+it is the kind that produces a confident number pointing the wrong way.
+
+The version *with* `log_Islet.Cells_c` is still fitted, as
+`*_rate_size`, so the difference is visible rather than asserted. Treat those
+as diagnostics, not results.
+
+A consequence worth noting: with `log_Islet.Cells_c` gone there is no slope to
+randomise, so the primary models use `(1|Donor) + (1|Donor:ImageID)` —
+**exactly the random-effect structure of your earlier scripts**. The one
+departure I had introduced disappears here.
+
+## The restriction, and why it limits the claim
+
+`offset(log(D))` is undefined when `D = 0`, so each model drops islets with no
+cells of the relevant type. That is not a nuisance — the donors it removes are
+systematic. Four of 21 Ki-67 T1D donors and six of 20 CD3 T1D donors have zero
+insulin+ cells in every islet, presumably the longest-duration cases. So a
+beta-cell rate result applies to donors with residual beta mass and is silent
+about donors with none. The restriction chunk names the dropped donors with
+their disease durations so this can be stated precisely.
+
+Centring is *not* recomputed on the restricted subsets, so coefficients stay
+comparable with the count models. The subset mean of `Age_c` is printed for each
+model, since the Diagnosis contrast is evaluated at `Age_c = 0` and that is no
+longer exactly the subset mean.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(glmmTMB)
+
+MODEL_DIR <- "Marker_Rate_Models"
+if (!dir.exists(MODEL_DIR)) dir.create(MODEL_DIR)
+
+REFIT_ALL      <- FALSE
+STAIN_HANDLING <- "double_only"      # must match marker_models_v6.Rmd
+RUN_SIZE_SENS  <- TRUE               # the *_rate_size diagnostics
+FAMILIES       <- c("nb1", "nb2", "zinb1")
+TMB_CTRL       <- glmmTMBControl(optCtrl = list(iter.max = 1000, eval.max = 1000))
+
+MARKERS <- c("ki67", "cd3")
+BINS <- tibble(
+  bin = c("ins", "glu", "aci"),
+  num = c("insulin_cells", "glucagon_cells", "acinar_cells"),
+  den = c("Count.ins", "Count.glu", "Count.Acinar")
+)
+```
+
+```{r load}
+get_marker <- function(tag) {
+  nm <- paste0(tag, "_data")
+  if (exists(nm, envir = globalenv())) return(get(nm, envir = globalenv()))
+  p <- sprintf("Data/%s_data.csv", tag)
+  if (!file.exists(p)) stop("missing ", p)
+  df <- readr::read_csv(p, show_col_types = FALSE) %>%
+    mutate(Diagnosis = factor(Diagnosis, levels = c("ND", "T1D")),
+           Region    = factor(Region, levels = c("Head", "Body", "Tail")),
+           Sex       = factor(Sex, levels = c("Female", "Male")),
+           Donor     = factor(Donor),
+           ImageID   = factor(ImageID))
+  if (identical(STAIN_HANDLING, "double_only")) {
+    df <- df[!is.na(df$Stain) & df$Stain == "Double", , drop = FALSE]
+  }
+  droplevels(df)
+}
+dat <- lapply(setNames(MARKERS, MARKERS), get_marker)
+for (tag in MARKERS) cat(sprintf("%-5s %7d islets, %2d donors\n", tag,
+  nrow(dat[[tag]]), dplyr::n_distinct(dat[[tag]]$Donor)))
+```
+
+# What the denominator restriction costs
+
+```{r restriction}
+subsets <- list()
+restrict_rows <- list()
+
+for (tag in MARKERS) {
+  d <- dat[[tag]]
+  for (i in seq_len(nrow(BINS))) {
+    id  <- paste0(tag, "_", BINS$bin[i])
+    den <- BINS$den[i]
+    keep <- !is.na(d[[den]]) & d[[den]] > 0
+    sub  <- droplevels(d[keep, , drop = FALSE])
+    subsets[[id]] <- sub
+
+    all_don  <- unique(as.character(d$Donor))
+    kept_don <- unique(as.character(sub$Donor))
+    lost     <- setdiff(all_don, kept_don)
+
+    restrict_rows[[id]] <- tibble(
+      model = id, offset = den,
+      islets_all = nrow(d), islets_kept = sum(keep),
+      pct_islets_lost = 100 * (1 - sum(keep) / nrow(d)),
+      donors_all = length(all_don), donors_kept = length(kept_don),
+      donors_lost = length(lost),
+      lost_ND  = sum(d$Diagnosis[match(lost, as.character(d$Donor))] == "ND"),
+      lost_T1D = sum(d$Diagnosis[match(lost, as.character(d$Donor))] == "T1D"),
+      mean_Age_c_subset = mean(sub$Age_c))
+
+    if (length(lost) > 0) {
+      info <- d %>%
+        filter(as.character(Donor) %in% lost) %>%
+        distinct(Donor, Diagnosis, Disease.Duration) %>%
+        arrange(Diagnosis, Disease.Duration)
+      cat(sprintf("\n%s: %d donor(s) dropped (no %s anywhere)\n", id, length(lost), den))
+      print(as.data.frame(info), row.names = FALSE)
+    }
+  }
+}
+
+cat("\n=== restriction summary ===\n")
+print(as.data.frame(bind_rows(restrict_rows)), digits = 4)
+cat("\nDropped donors are the limit on the claim, not a rounding error: a rate\n")
+cat("result describes donors that still have cells of that type.\n")
+```
+
+```{r betabinom-feasibility}
+# Beta-binomial would give a tighter model than a count with an offset, but it
+# needs numerator <= denominator, and the two come from different classifiers
+# with independent segmentation. Check rather than assume.
+cat("=== beta-binomial feasibility: numerator > denominator? ===\n")
+print(as.data.frame(bind_rows(lapply(MARKERS, function(tag) {
+  d <- dat[[tag]]
+  bind_rows(lapply(seq_len(nrow(BINS)), function(i) {
+    n <- d[[BINS$num[i]]]; D <- d[[BINS$den[i]]]
+    tibble(marker = tag, bin = BINS$bin[i],
+           n_violations = sum(n > D),
+           pct = 100 * mean(n > D),
+           worst_excess = if (any(n > D)) as.integer(max((n - D)[n > D])) else 0L)
+  }))
+}))), digits = 4)
+cat("\nUnder ~1% a beta-binomial is defensible after dropping the violations.\n")
+cat("Above that the offset model is the right choice: it does not require the\n")
+cat("numerator to be a subset of the denominator.\n")
+```
+
+# Formulas
+
+```{r formulas}
+# Your structure, minus log_Islet.Cells_c - the offset has taken over its role.
+RHS_RATE <- paste(
+  "(Diagnosis + Region + Sex + Age_c)^2",
+  "+ Diagnosis:Region:Age_c")
+
+# Diagnostic only: conditions on the beta fraction, which barely overlaps
+# between groups. See the header.
+RHS_RATE_SIZE <- paste(
+  "(Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2",
+  "+ Diagnosis:Region:log_Islet.Cells_c",
+  "+ Diagnosis:Region:Age_c")
+
+RE_PRIMARY <- "(1 | Donor) + (1 | Donor:ImageID)"          # as in the earlier scripts
+RE_SIZE    <- c("(1 + log_Islet.Cells_c | Donor) + (1 | Donor:ImageID)",
+                "(1 | Donor) + (0 + log_Islet.Cells_c | Donor) + (1 | Donor:ImageID)",
+                "(1 | Donor) + (1 | Donor:ImageID)")
+```
+
+# Fitting
+
+```{r fit-helpers}
+FAM_OBJ <- list(nb1 = nbinom1(), nb2 = nbinom2(), zinb1 = nbinom1())
+zi_of   <- function(fam, zi_rhs) if (grepl("^zi", fam)) zi_rhs else ~0
+
+build_rate_formula <- function(y, rhs, den, re) {
+  f <- as.formula(sprintf("%s ~ %s + offset(log(%s)) + %s", y, rhs, den, re))
+  environment(f) <- globalenv()
+  f
+}
+
+converged_ok <- function(m) {
+  if (is.null(m)) return(FALSE)
+  tryCatch(isTRUE(m$sdr$pdHess) &&
+             identical(as.integer(m$fit$convergence), 0L) &&
+             all(is.finite(sqrt(diag(vcov(m, full = TRUE))))),
+           error = function(e) FALSE)
+}
+
+degenerate_terms <- function(m, est_max = 15, se_max = 50) {
+  if (is.null(m)) return("NULL")
+  co <- tryCatch(summary(m)$coefficients, error = function(e) NULL)
+  if (is.null(co)) return("no coefficient table")
+  out <- character(0)
+  for (cmp in names(co)) {
+    tab <- co[[cmp]]
+    if (is.null(tab) || !is.matrix(tab) || !nrow(tab)) next
+    bad <- !is.finite(tab[, 1]) | !is.finite(tab[, 2]) |
+      abs(tab[, 1]) > est_max | tab[, 2] > se_max
+    if (any(bad)) out <- c(out, sprintf("%s: %s", cmp,
+                                        paste(rownames(tab)[bad], collapse = ", ")))
+  }
+  out
+}
+
+fit_cached <- function(name, fn) {
+  path <- file.path(MODEL_DIR, paste0(name, ".rds"))
+  if (!REFIT_ALL && file.exists(path)) return(readRDS(path))
+  t0 <- Sys.time(); m <- fn()
+  cat(sprintf("  [fit] %-30s %5.1f min%s\n", name,
+              as.numeric(difftime(Sys.time(), t0, units = "mins")),
+              if (is.null(m)) "  FAILED" else ""))
+  if (!is.null(m)) saveRDS(m, path)
+  m
+}
+
+fit_re <- function(y, rhs, den, data, fam, zi_rhs, re_options) {
+  for (re in re_options) {
+    m <- tryCatch(glmmTMB(build_rate_formula(y, rhs, den, re), data = data,
+                          family = FAM_OBJ[[fam]], ziformula = zi_of(fam, zi_rhs),
+                          control = TMB_CTRL),
+                  error = function(e) NULL)
+    if (converged_ok(m)) { attr(m, "re_used") <- re; attr(m, "fam_name") <- fam; return(m) }
+  }
+  NULL
+}
+
+# Family by AIC on the actual formula; non-convergence and boundary fits veto.
+fit_rate_model <- function(id, y, rhs, den, data, zi_rhs, re_options) {
+  fits <- list(); rows <- list()
+  for (f in FAMILIES) {
+    m <- fit_cached(paste0(id, "_", f),
+                    function() fit_re(y, rhs, den, data, f, zi_rhs, re_options))
+    fits[f] <- list(m)
+    deg <- degenerate_terms(m)
+    rows[[f]] <- tibble(family = f, AIC = if (converged_ok(m)) AIC(m) else NA_real_,
+                        ok = converged_ok(m), degenerate = length(deg) > 0,
+                        note = paste(deg, collapse = "; "))
+  }
+  tab <- bind_rows(rows) %>% arrange(AIC) %>% mutate(dAIC = AIC - min(AIC, na.rm = TRUE))
+  usable <- tab %>% filter(ok, !degenerate, is.finite(AIC))
+  if (!nrow(usable)) {
+    cat("  NO USABLE FAMILY for", id, "\n"); print(as.data.frame(tab), digits = 6)
+    return(list(model = NULL, family = NA_character_, table = tab))
+  }
+  win <- usable$family[which.min(usable$AIC)]
+  cat(sprintf("  %-18s family %-5s  AIC %10.1f%s\n", id, win, AIC(fits[[win]]),
+              if (any(tab$degenerate)) paste0("  (vetoed: ",
+                paste(tab$family[tab$degenerate], collapse = ", "), ")") else ""))
+  list(model = fits[[win]], family = win, table = tab)
+}
+```
+
+```{r fit-primary}
+rate_models <- list(); rate_fam <- character(0); rate_tabs <- list()
+
+cat("=== primary rate models (offset, no islet-size term) ===\n")
+for (tag in MARKERS) {
+  for (i in seq_len(nrow(BINS))) {
+    key <- paste0(tag, "_", BINS$bin[i])
+    id  <- paste0(key, "_rate")
+    res <- fit_rate_model(id, BINS$num[i], RHS_RATE, BINS$den[i],
+                          subsets[[key]], ~ Diagnosis, RE_PRIMARY)
+    rate_models[id] <- list(res$model)
+    rate_tabs[id]   <- list(res$table)
+    rate_fam[[id]]  <- res$family
+    assign(id, res$model, envir = globalenv())
+  }
+}
+```
+
+```{r fit-size-sens, eval = RUN_SIZE_SENS}
+cat("=== diagnostic: same models WITH log_Islet.Cells_c ===\n")
+cat("These condition on the beta fraction. Read the header before using them.\n")
+size_models <- list(); size_fam <- character(0)
+for (tag in MARKERS) {
+  for (i in seq_len(nrow(BINS))) {
+    key <- paste0(tag, "_", BINS$bin[i])
+    id  <- paste0(key, "_rate_size")
+    res <- fit_rate_model(id, BINS$num[i], RHS_RATE_SIZE, BINS$den[i],
+                          subsets[[key]], ~ Diagnosis, RE_SIZE)
+    size_models[id] <- list(res$model)
+    size_fam[[id]]  <- res$family
+    assign(id, res$model, envir = globalenv())
+  }
+}
+```
+
+# Rate ratios
+
+```{r rate-ratios}
+# With an offset, exp(DiagnosisT1D) is the rate ratio directly. For a
+# zero-inflated fit it must also be scaled by the change in the non-zero
+# probability, since a structural zero contributes no cells at all.
+rate_ratio <- function(m) {
+  if (is.null(m)) return(NULL)
+  co <- summary(m)$coefficients$cond
+  if (!"DiagnosisT1D" %in% rownames(co)) return(NULL)
+  est <- co["DiagnosisT1D", "Estimate"]; se <- co["DiagnosisT1D", "Std. Error"]
+  zi <- fixef(m)$zi
+  scale <- 1; p0 <- NA_real_; p1 <- NA_real_
+  if (length(zi)) {
+    p0 <- plogis(zi[["(Intercept)"]])
+    p1 <- if ("DiagnosisT1D" %in% names(zi))
+      plogis(zi[["(Intercept)"]] + zi[["DiagnosisT1D"]]) else p0
+    scale <- (1 - p1) / (1 - p0)
+  }
+  tibble(cond_rate_ratio = exp(est),
+         lwr = exp(est - 1.96 * se), upr = exp(est + 1.96 * se),
+         p = co["DiagnosisT1D", "Pr(>|z|)"],
+         zi_ND = p0, zi_T1D = p1,
+         marginal_rate_ratio = exp(est) * scale)
+}
+
+# Crude rates recomputed here so this file stands alone.
+crude <- bind_rows(lapply(MARKERS, function(tag) {
+  d <- dat[[tag]]
+  bind_rows(lapply(seq_len(nrow(BINS)), function(i) {
+    g <- d %>% group_by(Diagnosis) %>%
+      summarise(N = mean(.data[[BINS$num[i]]]),
+                D = mean(.data[[BINS$den[i]]]), .groups = "drop")
+    nd <- g[g$Diagnosis == "ND", ]; t1 <- g[g$Diagnosis == "T1D", ]
+    tibble(model = paste0(tag, "_", BINS$bin[i], "_rate"),
+           crude_ND_pct = 100 * nd$N / nd$D, crude_T1D_pct = 100 * t1$N / t1$D,
+           crude_fold_rate = (t1$N / t1$D) / (nd$N / nd$D))
+  }))
+}))
+
+res <- bind_rows(lapply(names(rate_models), function(id) {
+  rr <- rate_ratio(rate_models[[id]])
+  if (is.null(rr)) return(NULL)
+  rr %>% mutate(model = id, family = rate_fam[[id]], .before = 1)
+})) %>%
+  left_join(crude, by = "model") %>%
+  left_join(bind_rows(restrict_rows) %>%
+              mutate(model = paste0(model, "_rate")) %>%
+              dplyr::select(model, islets_kept, donors_kept, donors_lost),
+            by = "model")
+
+cat("=== per-cell rate ratios, T1D vs ND ===\n")
+cat("Region = Head, Sex = Female, mean Age. Adjusted for Region, Sex, Age and donor.\n\n")
+print(as.data.frame(res %>% dplyr::select(model, family, cond_rate_ratio, lwr, upr, p,
+                                          marginal_rate_ratio, crude_fold_rate,
+                                          islets_kept, donors_kept, donors_lost)),
+      digits = 4)
+
+cat("\nzero-inflation, where selected:\n")
+print(as.data.frame(res %>% filter(!is.na(zi_ND)) %>%
+                      dplyr::select(model, zi_ND, zi_T1D)), digits = 3)
+
+cat("\ncrude rates for reference (unadjusted, %):\n")
+print(as.data.frame(res %>% dplyr::select(model, crude_ND_pct, crude_T1D_pct)), digits = 3)
+```
+
+```{r size-comparison, eval = RUN_SIZE_SENS}
+cat("=== effect of adding log_Islet.Cells_c (diagnostic) ===\n")
+cmp <- bind_rows(lapply(names(rate_models), function(id) {
+  a <- rate_ratio(rate_models[[id]])
+  b <- rate_ratio(size_models[[paste0(id, "_size")]])
+  if (is.null(a) || is.null(b)) return(NULL)
+  tibble(model = id,
+         primary_ratio = a$marginal_rate_ratio, primary_p = a$p,
+         with_size_ratio = b$marginal_rate_ratio, with_size_p = b$p,
+         ratio_of_ratios = b$marginal_rate_ratio / a$marginal_rate_ratio,
+         # Guarded: sign(NA) is NA, and `if (NA)` errors rather than skipping.
+         flag = {
+           ra <- a$marginal_rate_ratio; rb <- b$marginal_rate_ratio
+           if (!is.finite(ra) || !is.finite(rb) || ra <= 0 || rb <= 0 ||
+               is.na(a$p) || is.na(b$p)) "not comparable"
+           else if (sign(log(ra)) != sign(log(rb))) "DIRECTION FLIP"
+           else if ((a$p < 0.05) != (b$p < 0.05)) "sig flip"
+           else ""
+         })
+}))
+print(as.data.frame(cmp), digits = 4)
+cat("\nA direction flip here is the positivity problem showing itself, not a\n")
+cat("finding: conditioning on both the cell count and the total conditions on\n")
+cat("the composition, which is what differs between the groups.\n")
+```
+
+```{r full-summaries}
+for (id in names(rate_models)) {
+  cat(sprintf("\n%s\n===== %s =====\n", strrep("=", 72), id))
+  if (is.null(rate_models[[id]])) cat("  no usable fit\n") else print(summary(rate_models[[id]]))
+}
+```
+
+```{r save}
+saveRDS(list(families = rate_fam, family_tables = rate_tabs,
+             restriction = bind_rows(restrict_rows), results = res),
+        file.path(MODEL_DIR, "rate_results.rds"))
+cat("\nModels cached in", MODEL_DIR, "\n")
+cat("Objects: summary(ki67_glu_rate), summary(cd3_aci_rate), etc.\n")
+```
+
+```{r session-info}
+sessionInfo()
+```

@@ -1,0 +1,146 @@
+---
+title: "Claude_checks"
+output: html_document
+date: "2026-06-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+```
+
+```{r}
+no_cutoff_data <- readRDS("Data/no_cutoff_data.rds")
+no_cutoff_data_t1d <- readRDS("Data/no_cutoff_data_t1d.rds")
+
+unique(no_cutoff_data$Donor)
+unique(no_cutoff_data_t1d$Donor)
+```
+
+```{r}
+library(readxl)
+
+path <- "C:/Users/hthor/Desktop/nPod results/Updated Supplementary Table S1 rev2.xlsx"
+
+ND  <- read_excel(path, sheet = 2, skip = 1) %>%
+  clean_names()
+T1D <- read_excel(path, sheet = 3, skip = 1) %>%
+  clean_names()
+
+names(ND)
+names(T1D)
+```
+
+```{r}
+library(dplyr)
+library(flextable)
+library(officer)
+ 
+# ---- 1. Donors to keep ------------------------------------------------------
+included <- trimws(as.character(unique(no_cutoff_data$Donor)))
+ 
+# ---- 2. Filter each dataset to the included donors --------------------------
+# Match the key type/format on both sides before filtering (your Donor column is
+# character because of the HPAP### IDs, so case_id must be character too).
+prep <- function(df) {
+  df %>%
+    mutate(case_id = trimws(as.character(case_id))) %>%
+    filter(case_id %in% included)
+}
+ 
+nd  <- prep(ND)
+t1d <- prep(T1D)
+ 
+# ---- Sanity checks (read these before trusting the table) -------------------
+matched <- c(nd$case_id, t1d$case_id)
+missing <- setdiff(included, matched)
+if (length(missing))
+  warning("Included donors not found in ND or T1D: ", paste(missing, collapse = ", "))
+ 
+dupe <- intersect(nd$case_id, t1d$case_id)
+if (length(dupe))
+  warning("Donors appearing in BOTH groups: ", paste(dupe, collapse = ", "))
+ 
+cat("ND n =", nrow(nd), " | T1D n =", nrow(t1d),
+    " | total =", nrow(nd) + nrow(t1d), "\n")
+ 
+# Confirm category labels match what the table expects (spelling/case matters):
+print(table(c(nd$gender,    t1d$gender)))
+print(table(c(nd$ethnicity, t1d$ethnicity)))
+ 
+# ---- 3. Helper summaries ----------------------------------------------------
+# "mean +/- SD" to 4 significant figures, matching the original table's style.
+msd <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  sprintf("%s \u00B1 %s",
+          signif(mean(x, na.rm = TRUE), 4),
+          signif(sd(x,   na.rm = TRUE), 4))
+}
+# case-insensitive category count within a column
+cnt <- function(df, col, value)
+  sum(trimws(tolower(df[[col]])) == tolower(value), na.rm = TRUE)
+ 
+# ---- 4. Build the column values ---------------------------------------------
+ethnicities <- c("African American", "Native American", "Asian",
+                 "Caucasian", "Hispanic", "Multiracial")
+ 
+make_col <- function(df) {
+  c(N                = nrow(df),
+    Age              = msd(df$age_yrs),
+    Sex              = "",
+    Female           = cnt(df, "gender", "Female"),
+    Male             = cnt(df, "gender", "Male"),
+    `Race/Ethnicity` = "",
+    setNames(sapply(ethnicities, function(e) cnt(df, "ethnicity", e)), ethnicities),
+    HbA1c            = msd(df$hb_a1c),
+    BMI              = msd(df$bmi))
+}
+ 
+nd_col  <- make_col(nd)
+t1d_col <- make_col(t1d)
+ 
+tab <- data.frame(
+  Diagnosis = names(nd_col),
+  ND        = unname(nd_col),
+  T1D       = unname(t1d_col),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+ 
+print(tab)   # <-- inspect the numbers before writing the file
+
+included <- trimws(as.character(unique(no_cutoff_data$Donor)))
+setdiff(included, c(nd$case_id, t1d$case_id))
+
+all_ids <- trimws(as.character(c(ND$case_id, T1D$case_id)))
+setdiff(included, all_ids)   # truly not present anywhere
+
+miss <- setdiff(included, c(nd$case_id, t1d$case_id))
+
+# show any raw case_id that resembles a missing one
+lapply(miss, function(m)
+  grep(m, all_ids, value = TRUE, ignore.case = TRUE))
+
+sum(is.na(no_cutoff_data$Donor))
+length(included)   # should be 106; if it's 104, the loss is upstream
+```
+
+```{r}
+setdiff(ND$case_id, nd$case_id)
+```
+
+
+```{r}
+# ---- 5. Write the corrected Word table --------------------------------------
+ft <- flextable(tab) |>
+  bold(i = which(tab$Diagnosis %in% c("Sex", "Race/Ethnicity")), j = 1) |>
+  align(j = 2:3, align = "center", part = "all") |>
+  autofit()
+ 
+doc <- read_docx() |>
+  body_add_par("Table 1: Subject demographics.", style = "Normal") |>
+  body_add_flextable(ft)
+ 
+print(doc, target = "Table_1_fixed.docx")
+cat("Wrote Table_1_fixed.docx to:", getwd(), "\n")
+```
+

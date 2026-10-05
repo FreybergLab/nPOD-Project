@@ -1,0 +1,1065 @@
+---
+title: "Model summary dot map (v3 — magnitude-faithful color)"
+output: html_document
+date: "2026-05-01"
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(glmmTMB)
+  library(emmeans)
+  library(brms)
+  library(coda)
+})
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
+MODEL_DIRS <- c(
+  "Density/Models",
+  "Count/Models",
+  "Area/Models/Total_Area",
+  "Area/Models/Per_Cell_Area",
+  "Ratio/Models",
+  "Proportion/Models"
+)
+
+OUT_LONG_RDS <- "model_summary_long_v3.rds"
+OUT_LONG_CSV <- "model_summary_long_v3.csv"
+
+# Output paths for this file. v3 uses "_v3" suffix to coexist with v1
+# (interaction contrasts) and v2 (simple effects, evidence-encoded color)
+# without overwriting either.
+OUT_PLOT_PRIMARY <- "npod_dot_heatmap_primary_v3.pdf"
+OUT_PLOT_SUPP    <- "npod_dot_heatmap_supplementary_v3.pdf"
+OUT_PLOT_PER_BLOCK_DIR <- "per_block_panels_v3"
+
+EVIDENCE_CAP <- 25     # cap on |signed -log10(p)| so size scale doesn't blow up
+SLOPE_STEP   <- 1      # finite-difference half-step for brms slopes
+
+# AO slope reference levels for the "DD slope @ low/high AO" simple effects.
+# Both contrast and slope variables are centered (suffix _c), so ±1 is one
+# centered unit on either side of the population mean.
+AO_LO <- -1
+AO_HI <-  1
+
+emm_options(lmer.df = "asymptotic")
+```
+
+```{r}
+discover_models <- function(dirs) {
+  files <- unlist(lapply(dirs, function(d) {
+    if (dir.exists(d)) list.files(d, pattern = "\\.rds$", full.names = TRUE)
+    else character(0)
+  }))
+  files <- files[!str_detect(basename(files), "(spline|diagnostic)")]
+  tibble(path = files, model_id = tools::file_path_sans_ext(basename(files)))
+}
+
+parse_metadata <- function(id) {
+  contrast <- if (str_detect(id, "(?:^|_)(t1d|dd|ao)(?:_|$)")) "T1D" else "Diagnosis"
+
+  variant <- case_when(
+    str_detect(id, "_powered_model$") ~ "powered",
+    str_detect(id, "_mid_model$")     ~ "mid",
+    str_detect(id, "_full_model$")    ~ "full",
+    str_detect(id, "_ao_model$")      ~ "ao",
+    str_detect(id, "_dd_model$")      ~ "dd",
+    TRUE                              ~ "primary"
+  )
+
+  outcome_family <- case_when(
+    str_detect(id, "^density")                                ~ "density",
+    str_detect(id, "^count_")                                  ~ "count",
+    str_detect(id, "^area_") |
+      str_detect(id, "_combined_(model|t1d)$")                 ~ "total_area",
+    str_detect(id, "^pc_")                                     ~ "per_cell_area",
+    str_detect(id, "^(ins|glu|soma|pp)_(powered|t1d|dd|ao)")   ~ "proportion",
+    str_detect(id, "^ratio_")                                  ~ "ratio",
+    TRUE                                                        ~ NA_character_
+  )
+
+  cell <- case_when(
+    str_detect(id, "ratio")                                                      ~ "beta_alpha",
+    str_detect(id, "density")                                                    ~ "all_cells",
+    str_detect(id, "(islet_cells|count_islet)")                                  ~ "islet_size",
+    str_detect(id, "(beta|^ins_|count_ins|pc_ins|^pc_beta)")                     ~ "beta",
+    str_detect(id, "(alpha|^glu_|count_glu|pc_alpha|^pc_glu)")                   ~ "alpha",
+    str_detect(id, "(delta|^soma_|count_soma|pc_delta|^pc_soma)")                ~ "delta",
+    str_detect(id, "(^pp_|count_pp|pc_pp|_pp_)")                                 ~ "PP",
+    TRUE                                                                          ~ NA_character_
+  )
+
+  subset <- case_when(
+    str_detect(id, "1cell")    ~ "1 cell",
+    str_detect(id, "2to14")    ~ "2-14 cells",
+    str_detect(id, "15plus")   ~ "15+ cells",
+    str_detect(id, "combined") ~ "combined",
+    TRUE                       ~ NA_character_
+  )
+
+  tibble(contrast = contrast, outcome_family = outcome_family,
+         cell = cell, subset = subset, variant = variant)
+}
+
+get_fixed_terms <- function(model) {
+  if (inherits(model, "glmmTMB")) {
+    return(all.vars(formula(model, fixed.only = TRUE)))
+  }
+  if (inherits(model, "brmsfit")) {
+    fe <- tryCatch(brms::brmsterms(model)$dpars$mu$fe$allvars,
+                   error = function(e) NULL)
+    if (is.null(fe)) {
+      fml <- tryCatch(model$formula$formula, error = function(e) NULL)
+      if (is.null(fml)) return(character(0))
+      return(all.vars(fml))
+    }
+    return(all.vars(fe))
+  }
+  character(0)
+}
+```
+
+```{r}
+# glmmTMB: signed -log10(p)
+# brmsfit: signed -log10(2(1-pd))
+signed_evidence <- function(estimate, pseudo_p, cap = EVIDENCE_CAP) {
+  ifelse(is.na(estimate) | is.na(pseudo_p), NA_real_,
+         sign(estimate) * pmin(-log10(pseudo_p + 1e-300), cap))
+}
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# GLMMTMB EXTRACTOR — simple-effects parameterization
+# -----------------------------------------------------------------------------
+# Replaces interaction contrasts (e.g., "Diag x Region (Body)") with
+# simple effects at each level (e.g., "T1D-ND @ Head", "T1D-ND @ Body").
+# The pattern: instead of asking "is the T1D effect *different* between
+# regions?", we ask "what is the T1D effect *at each region?*". A reader
+# can reconstruct the interaction visually by comparing dots in the same row.
+
+# Tidy a single emmeans pair into our schema.
+emm_pair_row <- function(pair_obj, label, reverse_sign = FALSE) {
+  s <- as.data.frame(summary(pair_obj))
+  if (nrow(s) == 0) return(NULL)
+  est <- s$estimate[1] * (if (reverse_sign) -1 else 1)
+  tibble(
+    label     = label,
+    estimate  = est,
+    std.error = s$SE[1],
+    conf.low  = est - 1.96 * s$SE[1],
+    conf.high = est + 1.96 * s$SE[1],
+    pseudo_p  = s$p.value[1]
+  )
+}
+
+emm_trend_row <- function(trend_obj, label) {
+  s <- as.data.frame(summary(trend_obj))
+  trend_col <- grep("\\.trend$", names(s), value = TRUE)[1]
+  if (is.na(trend_col)) return(NULL)
+  test_df <- tryCatch(as.data.frame(test(trend_obj)),
+                      error = function(e) data.frame(p.value = NA_real_))
+  tibble(
+    label     = label,
+    estimate  = s[[trend_col]][1],
+    std.error = s$SE[1],
+    conf.low  = s[[trend_col]][1] - 1.96 * s$SE[1],
+    conf.high = s[[trend_col]][1] + 1.96 * s$SE[1],
+    pseudo_p  = test_df$p.value[1]
+  )
+}
+
+# Pull a per-row tibble out of an emmeans result for a specific value of one
+# grouping factor. Used for "T1D-ND @ Head" style simple effects.
+emm_pair_at <- function(em_obj, group_var, group_val, label, reverse_sign = FALSE) {
+  pairs_obj <- pairs(em_obj, by = group_var)
+  s <- as.data.frame(summary(pairs_obj))
+  if (!group_var %in% names(s)) return(NULL)
+  i <- which(s[[group_var]] == group_val)
+  if (length(i) == 0) return(NULL)
+  est <- s$estimate[i[1]] * (if (reverse_sign) -1 else 1)
+  tibble(
+    label     = label,
+    estimate  = est,
+    std.error = s$SE[i[1]],
+    conf.low  = est - 1.96 * s$SE[i[1]],
+    conf.high = est + 1.96 * s$SE[i[1]],
+    pseudo_p  = s$p.value[i[1]]
+  )
+}
+
+# Per-group slope from emtrends; e.g. "Age slope @ ND".
+emm_trend_at <- function(model, by_formula, var, by_var, by_val, label,
+                         data, at_list = NULL) {
+  call_args <- list(object = model, specs = by_formula, var = var, data = data)
+  if (!is.null(at_list)) call_args$at <- at_list
+  et <- do.call(emtrends, call_args)
+  s <- as.data.frame(summary(et))
+  if (!by_var %in% names(s)) return(NULL)
+  trend_col <- grep("\\.trend$", names(s), value = TRUE)[1]
+  if (is.na(trend_col)) return(NULL)
+  i <- which(s[[by_var]] == by_val)
+  if (length(i) == 0) return(NULL)
+  test_df <- tryCatch(as.data.frame(test(et)),
+                      error = function(e) data.frame(p.value = rep(NA_real_, nrow(s))))
+  tibble(
+    label     = label,
+    estimate  = s[[trend_col]][i[1]],
+    std.error = s$SE[i[1]],
+    conf.low  = s[[trend_col]][i[1]] - 1.96 * s$SE[i[1]],
+    conf.high = s[[trend_col]][i[1]] + 1.96 * s$SE[i[1]],
+    pseudo_p  = test_df$p.value[i[1]]
+  )
+}
+
+extract_glmmTMB <- function(model, contrast_type) {
+  fe  <- get_fixed_terms(model)
+  has <- function(v) all(v %in% fe)
+
+  mf <- tryCatch(model.frame(model),
+                 error = function(e) tryCatch(model$frame,
+                                              error = function(e2) NULL))
+
+  rows <- list()
+  add  <- function(lbl, df) { if (!is.null(df)) rows[[lbl]] <<- df }
+
+  # ----- DIAGNOSIS-CONTRAST MODELS -----
+  if (contrast_type == "Diagnosis") {
+
+    # Overall T1D - ND (averaged over Region and Sex)
+    if (has("Diagnosis"))
+      add("T1D-ND", emm_pair_row(
+        pairs(emmeans(model, ~ Diagnosis, data = mf)),
+        "T1D-ND", reverse_sign = TRUE))
+
+    # T1D - ND at each Region (simple effects, no interaction needed)
+    if (has(c("Diagnosis", "Region"))) {
+      em <- emmeans(model, ~ Diagnosis | Region, data = mf)
+      for (reg in c("Head", "Body", "Tail")) {
+        add(paste0("T1D-ND @ ", reg),
+            emm_pair_at(em, "Region", reg,
+                        paste0("T1D-ND @ ", reg), reverse_sign = TRUE))
+      }
+    }
+
+    # T1D - ND at each Sex
+    if (has(c("Diagnosis", "Sex"))) {
+      em <- emmeans(model, ~ Diagnosis | Sex, data = mf)
+      for (sx in c("Female", "Male")) {
+        add(paste0("T1D-ND @ ", sx),
+            emm_pair_at(em, "Sex", sx,
+                        paste0("T1D-ND @ ", sx), reverse_sign = TRUE))
+      }
+    }
+
+    # Region pairwise contrasts (averaged over Diagnosis and Sex)
+    if (has("Region")) {
+      pr_df <- as.data.frame(summary(pairs(emmeans(model, ~ Region, data = mf))))
+      for (i in seq_len(nrow(pr_df))) {
+        lbl <- as.character(pr_df$contrast[i])
+        add(lbl, tibble(
+          label = lbl, estimate = pr_df$estimate[i], std.error = pr_df$SE[i],
+          conf.low = pr_df$estimate[i] - 1.96 * pr_df$SE[i],
+          conf.high = pr_df$estimate[i] + 1.96 * pr_df$SE[i],
+          pseudo_p = pr_df$p.value[i]))
+      }
+    }
+
+    # Male - Female (averaged over Diagnosis)
+    if (has("Sex"))
+      add("Male-Female", emm_pair_row(
+        pairs(emmeans(model, ~ Sex, data = mf)),
+        "Male-Female", reverse_sign = TRUE))
+
+    # Age slope at each Diagnosis (simple effects)
+    if (has(c("Diagnosis", "Age_c"))) {
+      for (dg in c("ND", "T1D")) {
+        add(paste0("Age slope @ ", dg),
+            emm_trend_at(model, ~ Diagnosis, var = "Age_c",
+                         by_var = "Diagnosis", by_val = dg,
+                         label = paste0("Age slope @ ", dg), data = mf))
+      }
+    } else if (has("Age_c")) {
+      # No interaction — single overall slope, label it "Age slope" for clarity
+      add("Age slope", emm_trend_row(
+        emtrends(model, ~ 1, var = "Age_c", data = mf), "Age slope"))
+    }
+
+    # log_IC slope at each Diagnosis
+    if (has(c("Diagnosis", "log_Islet.Cells_c"))) {
+      for (dg in c("ND", "T1D")) {
+        add(paste0("log_IC slope @ ", dg),
+            emm_trend_at(model, ~ Diagnosis, var = "log_Islet.Cells_c",
+                         by_var = "Diagnosis", by_val = dg,
+                         label = paste0("log_IC slope @ ", dg), data = mf))
+      }
+    } else if (has("log_Islet.Cells_c")) {
+      add("log_IC slope", emm_trend_row(
+        emtrends(model, ~ 1, var = "log_Islet.Cells_c", data = mf), "log_IC slope"))
+    }
+
+  } else {
+    # ----- T1D-ONLY MODELS -----
+
+    # Overall DD slope
+    if (has("Disease.Duration_c"))
+      add("DD slope", emm_trend_row(
+        emtrends(model, ~ 1, var = "Disease.Duration_c", data = mf), "DD slope"))
+
+    # DD slope at each Region
+    if (has(c("Disease.Duration_c", "Region"))) {
+      for (reg in c("Head", "Body", "Tail")) {
+        add(paste0("DD slope @ ", reg),
+            emm_trend_at(model, ~ Region, var = "Disease.Duration_c",
+                         by_var = "Region", by_val = reg,
+                         label = paste0("DD slope @ ", reg), data = mf))
+      }
+    }
+
+    # DD slope at each Sex
+    if (has(c("Disease.Duration_c", "Sex"))) {
+      for (sx in c("Female", "Male")) {
+        add(paste0("DD slope @ ", sx),
+            emm_trend_at(model, ~ Sex, var = "Disease.Duration_c",
+                         by_var = "Sex", by_val = sx,
+                         label = paste0("DD slope @ ", sx), data = mf))
+      }
+    }
+
+    # DD slope at low / high AO (simple effect of DD at two AO levels)
+    if (has(c("Disease.Duration_c", "age_at_onset_c"))) {
+      add("DD slope @ low AO",
+          emm_trend_at(model, ~ age_at_onset_c, var = "Disease.Duration_c",
+                       by_var = "age_at_onset_c", by_val = AO_LO,
+                       label = "DD slope @ low AO", data = mf,
+                       at_list = list(age_at_onset_c = c(AO_LO, AO_HI))))
+      add("DD slope @ high AO",
+          emm_trend_at(model, ~ age_at_onset_c, var = "Disease.Duration_c",
+                       by_var = "age_at_onset_c", by_val = AO_HI,
+                       label = "DD slope @ high AO", data = mf,
+                       at_list = list(age_at_onset_c = c(AO_LO, AO_HI))))
+    }
+
+    # AO slope (overall — there's no "at each Diagnosis" since these are T1D-only)
+    if (has("age_at_onset_c"))
+      add("AO slope", emm_trend_row(
+        emtrends(model, ~ 1, var = "age_at_onset_c", data = mf), "AO slope"))
+
+    # log_IC slope (overall)
+    if (has("log_Islet.Cells_c"))
+      add("log_IC slope", emm_trend_row(
+        emtrends(model, ~ 1, var = "log_Islet.Cells_c", data = mf), "log_IC slope"))
+
+    # Region pairwise contrasts
+    if (has("Region")) {
+      pr_df <- as.data.frame(summary(pairs(emmeans(model, ~ Region, data = mf))))
+      for (i in seq_len(nrow(pr_df))) {
+        lbl <- as.character(pr_df$contrast[i])
+        add(lbl, tibble(
+          label = lbl, estimate = pr_df$estimate[i], std.error = pr_df$SE[i],
+          conf.low = pr_df$estimate[i] - 1.96 * pr_df$SE[i],
+          conf.high = pr_df$estimate[i] + 1.96 * pr_df$SE[i],
+          pseudo_p = pr_df$p.value[i]))
+      }
+    }
+
+    # Male - Female
+    if (has("Sex"))
+      add("Male-Female", emm_pair_row(
+        pairs(emmeans(model, ~ Sex, data = mf)),
+        "Male-Female", reverse_sign = TRUE))
+  }
+
+  if (length(rows) == 0) return(NULL)
+  bind_rows(rows) %>%
+    mutate(pd = NA_real_,
+           evidence = signed_evidence(estimate, pseudo_p))
+}
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# BRMSFIT EXTRACTOR — simple-effects parameterization
+# -----------------------------------------------------------------------------
+# Posterior contrasts on the response scale via fitted() + grid averaging.
+# Same idea as the glmmTMB extractor: simple effects at each level instead of
+# interaction contrasts.
+
+post_summary <- function(d, label) {
+  hpd <- coda::HPDinterval(coda::as.mcmc(d), prob = 0.95)
+  pd  <- max(mean(d > 0, na.rm = TRUE), mean(d < 0, na.rm = TRUE))
+  tibble(
+    label     = label,
+    estimate  = median(d, na.rm = TRUE),
+    std.error = sd(d, na.rm = TRUE),
+    conf.low  = hpd[1],
+    conf.high = hpd[2],
+    pseudo_p  = 2 * (1 - pd),
+    pd        = pd
+  )
+}
+
+post_fitted <- function(model, grid) {
+  fitted(model, newdata = grid, re_formula = NA, summary = FALSE)
+}
+
+cell_avg <- function(pf, mask) rowMeans(pf[, mask, drop = FALSE])
+
+extract_brmsfit <- function(model, contrast_type) {
+  fe  <- get_fixed_terms(model)
+  has <- function(v) all(v %in% fe)
+
+  rows <- list()
+  add  <- function(lbl, df) { if (!is.null(df)) rows[[lbl]] <<- df }
+
+  if (contrast_type == "Diagnosis") {
+    cat_grid <- expand.grid(
+      Diagnosis = c("ND", "T1D"),
+      Region    = c("Head", "Body", "Tail"),
+      Sex       = c("Female", "Male"),
+      Age_c              = 0,
+      log_Islet.Cells_c  = 0,
+      stringsAsFactors   = FALSE
+    )
+    pf <- post_fitted(model, cat_grid)
+
+    # T1D - ND overall (averaged over Region and Sex)
+    if (has("Diagnosis")) {
+      nd  <- cell_avg(pf, cat_grid$Diagnosis == "ND")
+      t1d <- cell_avg(pf, cat_grid$Diagnosis == "T1D")
+      add("T1D-ND", post_summary(t1d - nd, "T1D-ND"))
+    }
+
+    # T1D - ND at each Region (simple effect)
+    if (has(c("Diagnosis", "Region"))) {
+      for (reg in c("Head", "Body", "Tail")) {
+        nd  <- cell_avg(pf, cat_grid$Diagnosis == "ND"  & cat_grid$Region == reg)
+        t1d <- cell_avg(pf, cat_grid$Diagnosis == "T1D" & cat_grid$Region == reg)
+        add(paste0("T1D-ND @ ", reg),
+            post_summary(t1d - nd, paste0("T1D-ND @ ", reg)))
+      }
+    }
+
+    # T1D - ND at each Sex
+    if (has(c("Diagnosis", "Sex"))) {
+      for (sx in c("Female", "Male")) {
+        nd  <- cell_avg(pf, cat_grid$Diagnosis == "ND"  & cat_grid$Sex == sx)
+        t1d <- cell_avg(pf, cat_grid$Diagnosis == "T1D" & cat_grid$Sex == sx)
+        add(paste0("T1D-ND @ ", sx),
+            post_summary(t1d - nd, paste0("T1D-ND @ ", sx)))
+      }
+    }
+
+    # Region pairwise (averaged over Diagnosis and Sex)
+    if (has("Region")) {
+      h <- cell_avg(pf, cat_grid$Region == "Head")
+      b <- cell_avg(pf, cat_grid$Region == "Body")
+      t <- cell_avg(pf, cat_grid$Region == "Tail")
+      add("Head - Body", post_summary(h - b, "Head - Body"))
+      add("Head - Tail", post_summary(h - t, "Head - Tail"))
+      add("Body - Tail", post_summary(b - t, "Body - Tail"))
+    }
+
+    # Male - Female
+    if (has("Sex")) {
+      f <- cell_avg(pf, cat_grid$Sex == "Female")
+      m <- cell_avg(pf, cat_grid$Sex == "Male")
+      add("Male-Female", post_summary(m - f, "Male-Female"))
+    }
+
+    # Age slope at each Diagnosis
+    if (has("Age_c")) {
+      ag <- expand.grid(
+        Diagnosis = c("ND","T1D"), Region = c("Head","Body","Tail"),
+        Sex = c("Female","Male"),
+        Age_c = c(-SLOPE_STEP, SLOPE_STEP),
+        log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      pf_ag <- post_fitted(model, ag)
+      slope_at_diag <- function(dg) {
+        hi <- cell_avg(pf_ag, ag$Diagnosis == dg & ag$Age_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf_ag, ag$Diagnosis == dg & ag$Age_c == -SLOPE_STEP)
+        (hi - lo) / (2 * SLOPE_STEP)
+      }
+      if (has("Diagnosis")) {
+        for (dg in c("ND", "T1D")) {
+          add(paste0("Age slope @ ", dg),
+              post_summary(slope_at_diag(dg), paste0("Age slope @ ", dg)))
+        }
+      } else {
+        # No Diagnosis term in model — single overall slope
+        hi <- cell_avg(pf_ag, ag$Age_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf_ag, ag$Age_c == -SLOPE_STEP)
+        add("Age slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "Age slope"))
+      }
+    }
+
+    # log_IC slope at each Diagnosis
+    if (has("log_Islet.Cells_c")) {
+      ig <- expand.grid(
+        Diagnosis = c("ND","T1D"), Region = c("Head","Body","Tail"),
+        Sex = c("Female","Male"),
+        Age_c = 0,
+        log_Islet.Cells_c = c(-SLOPE_STEP, SLOPE_STEP),
+        stringsAsFactors = FALSE)
+      pf_ig <- post_fitted(model, ig)
+      slope_at_diag <- function(dg) {
+        hi <- cell_avg(pf_ig, ig$Diagnosis == dg & ig$log_Islet.Cells_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf_ig, ig$Diagnosis == dg & ig$log_Islet.Cells_c == -SLOPE_STEP)
+        (hi - lo) / (2 * SLOPE_STEP)
+      }
+      if (has("Diagnosis")) {
+        for (dg in c("ND", "T1D")) {
+          add(paste0("log_IC slope @ ", dg),
+              post_summary(slope_at_diag(dg), paste0("log_IC slope @ ", dg)))
+        }
+      } else {
+        hi <- cell_avg(pf_ig, ig$log_Islet.Cells_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf_ig, ig$log_Islet.Cells_c == -SLOPE_STEP)
+        add("log_IC slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "log_IC slope"))
+      }
+    }
+
+  } else {
+    # ----- T1D-ONLY MODELS -----
+    cat_grid <- expand.grid(
+      Region = c("Head","Body","Tail"),
+      Sex    = c("Female","Male"),
+      Disease.Duration_c = 0,
+      age_at_onset_c     = 0,
+      log_Islet.Cells_c  = 0,
+      stringsAsFactors   = FALSE
+    )
+
+    # DD slope helper for grids that vary DD around 0
+    dd_slope <- function(grid_with_dd, mask) {
+      pf <- post_fitted(model, grid_with_dd)
+      hi <- cell_avg(pf, mask & grid_with_dd$Disease.Duration_c ==  SLOPE_STEP)
+      lo <- cell_avg(pf, mask & grid_with_dd$Disease.Duration_c == -SLOPE_STEP)
+      (hi - lo) / (2 * SLOPE_STEP)
+    }
+
+    # Overall DD slope (averaged over Region and Sex)
+    if (has("Disease.Duration_c")) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
+        age_at_onset_c = 0, log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      add("DD slope", post_summary(dd_slope(g, rep(TRUE, nrow(g))), "DD slope"))
+    }
+
+    # DD slope at each Region
+    if (has(c("Disease.Duration_c", "Region"))) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
+        age_at_onset_c = 0, log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      pf <- post_fitted(model, g)
+      for (reg in c("Head", "Body", "Tail")) {
+        hi <- cell_avg(pf, g$Region == reg & g$Disease.Duration_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf, g$Region == reg & g$Disease.Duration_c == -SLOPE_STEP)
+        add(paste0("DD slope @ ", reg),
+            post_summary((hi - lo) / (2 * SLOPE_STEP),
+                         paste0("DD slope @ ", reg)))
+      }
+    }
+
+    # DD slope at each Sex
+    if (has(c("Disease.Duration_c", "Sex"))) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
+        age_at_onset_c = 0, log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      pf <- post_fitted(model, g)
+      for (sx in c("Female", "Male")) {
+        hi <- cell_avg(pf, g$Sex == sx & g$Disease.Duration_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf, g$Sex == sx & g$Disease.Duration_c == -SLOPE_STEP)
+        add(paste0("DD slope @ ", sx),
+            post_summary((hi - lo) / (2 * SLOPE_STEP),
+                         paste0("DD slope @ ", sx)))
+      }
+    }
+
+    # DD slope at low / high AO
+    if (has(c("Disease.Duration_c", "age_at_onset_c"))) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
+        age_at_onset_c = c(AO_LO, AO_HI),
+        log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      pf <- post_fitted(model, g)
+      for (ao_val in c(AO_LO, AO_HI)) {
+        hi <- cell_avg(pf, g$age_at_onset_c == ao_val & g$Disease.Duration_c ==  SLOPE_STEP)
+        lo <- cell_avg(pf, g$age_at_onset_c == ao_val & g$Disease.Duration_c == -SLOPE_STEP)
+        ao_label <- if (ao_val == AO_LO) "low AO" else "high AO"
+        add(paste0("DD slope @ ", ao_label),
+            post_summary((hi - lo) / (2 * SLOPE_STEP),
+                         paste0("DD slope @ ", ao_label)))
+      }
+    }
+
+    # AO slope (overall)
+    if (has("age_at_onset_c")) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = 0,
+        age_at_onset_c = c(-SLOPE_STEP, SLOPE_STEP),
+        log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
+      pf <- post_fitted(model, g)
+      hi <- cell_avg(pf, g$age_at_onset_c ==  SLOPE_STEP)
+      lo <- cell_avg(pf, g$age_at_onset_c == -SLOPE_STEP)
+      add("AO slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "AO slope"))
+    }
+
+    # log_IC slope (overall)
+    if (has("log_Islet.Cells_c")) {
+      g <- expand.grid(
+        Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
+        Disease.Duration_c = 0, age_at_onset_c = 0,
+        log_Islet.Cells_c = c(-SLOPE_STEP, SLOPE_STEP),
+        stringsAsFactors = FALSE)
+      pf <- post_fitted(model, g)
+      hi <- cell_avg(pf, g$log_Islet.Cells_c ==  SLOPE_STEP)
+      lo <- cell_avg(pf, g$log_Islet.Cells_c == -SLOPE_STEP)
+      add("log_IC slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "log_IC slope"))
+    }
+
+    # Region pairwise (averaged over everything else)
+    if (has("Region")) {
+      pf <- post_fitted(model, cat_grid)
+      h <- cell_avg(pf, cat_grid$Region == "Head")
+      b <- cell_avg(pf, cat_grid$Region == "Body")
+      t <- cell_avg(pf, cat_grid$Region == "Tail")
+      add("Head - Body", post_summary(h - b, "Head - Body"))
+      add("Head - Tail", post_summary(h - t, "Head - Tail"))
+      add("Body - Tail", post_summary(b - t, "Body - Tail"))
+    }
+
+    # Male - Female
+    if (has("Sex")) {
+      pf <- post_fitted(model, cat_grid)
+      f <- cell_avg(pf, cat_grid$Sex == "Female")
+      m <- cell_avg(pf, cat_grid$Sex == "Male")
+      add("Male-Female", post_summary(m - f, "Male-Female"))
+    }
+  }
+
+  if (length(rows) == 0) return(NULL)
+  bind_rows(rows) %>%
+    mutate(evidence = signed_evidence(estimate, pseudo_p))
+}
+```
+
+```{r}
+extract_one <- function(path, model_id, contrast_type) {
+  m <- tryCatch(readRDS(path), error = function(e) NULL)
+  if (is.null(m)) { warning("Could not read: ", path); return(NULL) }
+
+  fe <- get_fixed_terms(m)
+  has_diag     <- "Diagnosis" %in% fe
+  has_dd_or_ao <- any(c("Disease.Duration_c", "age_at_onset_c") %in% fe)
+  inferred <- if (has_diag) "Diagnosis"
+              else if (has_dd_or_ao) "T1D"
+              else contrast_type
+  if (inferred != contrast_type) {
+    cat("  ", model_id, " [auto-corrected: ", contrast_type, " -> ", inferred, "]\n", sep = "")
+    contrast_type <- inferred
+  } else {
+    cat("  ", model_id, " (", contrast_type, ")\n", sep = "")
+  }
+
+  out <- tryCatch({
+    if (inherits(m, "glmmTMB"))      extract_glmmTMB(m, contrast_type)
+    else if (inherits(m, "brmsfit")) extract_brmsfit(m, contrast_type)
+    else { warning("Unknown class: ", paste(class(m), collapse = ",")); NULL }
+  }, error = function(e) {
+    warning("Failed on ", model_id, ": ", conditionMessage(e)); NULL
+  })
+
+  rm(m); gc(verbose = FALSE)
+  if (!is.null(out) && nrow(out) > 0) {
+    out$model_id          <- model_id
+    out$contrast_inferred <- contrast_type
+  }
+  out
+}
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# RUN PIPELINE
+# -----------------------------------------------------------------------------
+files_df <- discover_models(MODEL_DIRS)
+cat("Discovered", nrow(files_df), "model files.\n")
+
+meta_df <- files_df %>%
+  rowwise() %>%
+  mutate(parse_metadata(model_id)) %>%
+  ungroup()
+
+cat("Extracting marginal contrasts/slopes (simple-effects parameterization)...\n")
+fixed_long <- pmap_dfr(
+  list(meta_df$path, meta_df$model_id, meta_df$contrast),
+  extract_one
+)
+
+results <- fixed_long %>%
+  left_join(meta_df %>% select(-contrast), by = "model_id") %>%
+  rename(contrast = contrast_inferred)
+
+saveRDS(results, OUT_LONG_RDS)
+write_csv(results, OUT_LONG_CSV)
+cat("Wrote", OUT_LONG_RDS, "and", OUT_LONG_CSV, "\n")
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# OUTCOME LABELS, ROW ORDER, SEPARATOR ANCHORS — same as v1
+# -----------------------------------------------------------------------------
+build_plot_df <- function(df) {
+  df %>%
+    filter(!is.na(outcome_family), !is.na(label)) %>%
+    mutate(
+      outcome_label = case_when(
+        outcome_family == "density"                      ~ "Islet density",
+        outcome_family == "count" & cell == "beta"       ~ "beta-cell count",
+        outcome_family == "count" & cell == "alpha"      ~ "alpha-cell count",
+        outcome_family == "count" & cell == "delta"      ~ "delta-cell count",
+        outcome_family == "count" & cell == "PP"         ~ "PP-cell count",
+        outcome_family == "count" & cell == "islet_size" ~ "Islet cells",
+        outcome_family == "total_area"                   ~ paste0(cell, "-cell total area (", subset, ")"),
+        outcome_family == "per_cell_area"                ~ paste0(cell, ": per-cell area (", subset, ")"),
+        outcome_family == "proportion"                   ~ paste0("% ", cell, "-cell"),
+        outcome_family == "ratio"                        ~ "beta:alpha ratio",
+        TRUE                                             ~ model_id
+      ),
+      z_like = ifelse(std.error > 0, estimate / std.error, NA_real_)
+    ) %>%
+    # ----- WITHIN-BLOCK NORMALIZATION FOR COLOR (v3) -----
+    # Color encodes signed magnitude on the model's natural scale (log-ratio
+    # for glmmTMB log-link models, probability difference for ordbetareg),
+    # rescaled so that the largest |estimate| within each outcome_family
+    # saturates at ±1. This makes the color scale BIOLOGICALLY MAGNITUDE-
+    # FAITHFUL within block (a deeply-colored cell is large for its class)
+    # and visually comparable across blocks (a deeply-colored cell in any
+    # block is "the dominant effect for this kind of outcome"), without
+    # falsely conflating different units (a 95% T1D loss vs a 5% PP shift).
+    group_by(outcome_family) %>%
+    mutate(
+      block_max_abs    = max(abs(estimate), na.rm = TRUE),
+      color_val        = ifelse(block_max_abs > 0,
+                                estimate / block_max_abs, 0)
+    ) %>%
+    ungroup()
+}
+
+outcome_order <- c(
+  "Islet density",
+  "beta-cell count", "alpha-cell count", "delta-cell count", "PP-cell count", "Islet cells",
+  outer(c("1 cell","2-14 cells","15+ cells","combined"),
+        c("beta","alpha","delta","PP"),
+        function(s, c) paste0(c, "-cell total area (", s, ")")) %>% as.vector(),
+  outer(c("2-14 cells","15+ cells","combined"),
+        c("beta","alpha","delta","PP"),
+        function(s, c) paste0(c, ": per-cell area (", s, ")")) %>% as.vector(),
+  "% beta-cell", "% alpha-cell", "% delta-cell", "% PP-cell",
+  "beta:alpha ratio"
+)
+
+sep_y_after <- function(label) {
+  length(outcome_order) - match(label, outcome_order) + 0.5
+}
+
+separators_major_y <- c(
+  sep_y_after("Islet cells"),
+  sep_y_after("PP-cell total area (combined)"),
+  sep_y_after("PP: per-cell area (combined)"),
+  sep_y_after("% PP-cell")
+)
+
+separators_minor_y <- c(
+  sep_y_after("beta-cell total area (combined)"),
+  sep_y_after("alpha-cell total area (combined)"),
+  sep_y_after("delta-cell total area (combined)"),
+  sep_y_after("beta: per-cell area (combined)"),
+  sep_y_after("alpha: per-cell area (combined)"),
+  sep_y_after("delta: per-cell area (combined)")
+)
+
+stopifnot(!any(is.na(separators_major_y)))
+stopifnot(!any(is.na(separators_minor_y)))
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# COLUMN ORDER — simple-effects parameterization (replaces v1's interactions)
+# -----------------------------------------------------------------------------
+# Diagnosis panel (13 columns):
+#   Block 1: T1D - ND overall + per-region + per-sex simple effects
+#   Block 2: Region pairwise + Male-Female
+#   Block 3: Age slope at each Diagnosis
+#   Block 4: log_IC slope at each Diagnosis
+#
+# T1D panel (14 columns):
+#   Block 1: DD slope overall + per-region + per-sex + per-AO simple effects
+#   Block 2: AO slope, log_IC slope (overall — these don't have Diagnosis as a moderator)
+#   Block 3: Region pairwise + Male-Female
+
+term_order_diag <- c(
+  # Block 1: T1D effect, in detail
+  "T1D-ND",
+  "T1D-ND @ Head", "T1D-ND @ Body", "T1D-ND @ Tail",
+  "T1D-ND @ Female", "T1D-ND @ Male",
+  # Block 2: anatomy / demographics
+  "Head - Body", "Head - Tail", "Body - Tail",
+  "Male-Female",
+  # Block 3: Age slope by diagnosis
+  "Age slope", "Age slope @ ND", "Age slope @ T1D",
+  # Block 4: log_IC slope by diagnosis
+  "log_IC slope", "log_IC slope @ ND", "log_IC slope @ T1D"
+)
+
+term_order_t1d <- c(
+  # Block 1: DD slope, in detail
+  "DD slope",
+  "DD slope @ Head", "DD slope @ Body", "DD slope @ Tail",
+  "DD slope @ Female", "DD slope @ Male",
+  "DD slope @ low AO", "DD slope @ high AO",
+  # Block 2: other slopes (overall only — no Diagnosis to stratify by)
+  "AO slope", "log_IC slope",
+  # Block 3: anatomy / demographics
+  "Head - Body", "Head - Tail", "Body - Tail",
+  "Male-Female"
+)
+
+all_term_order <- unique(c(term_order_diag, term_order_t1d))
+
+# Within-panel sub-block separators (faint vertical lines).
+# Positions are after the named term; on a discrete x-axis, the separator
+# sits at index + 0.5 from the term's position.
+diag_block_breaks <- c(
+  match("T1D-ND @ Male",     term_order_diag) + 0.5,  # block 1 | block 2
+  match("Male-Female",       term_order_diag) + 0.5,  # block 2 | block 3
+  match("Age slope @ T1D",   term_order_diag) + 0.5   # block 3 | block 4
+)
+t1d_block_breaks <- c(
+  match("DD slope @ high AO", term_order_t1d) + 0.5,  # block 1 | block 2
+  match("log_IC slope",       term_order_t1d) + 0.5   # block 2 | block 3
+)
+
+clip <- function(x, lim) pmax(pmin(x, lim), -lim)
+
+# Tighter cap and wider size range — smaller dots get genuinely small,
+# evidence above p=0.001 saturates (which is fine: beyond that, color carries
+# the differentiation, and you mostly care about direction not "how strong").
+EVIDENCE_VIS_CAP <- 3
+SIZE_RANGE       <- c(0.2, 5.5)
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# Plot builder
+# -----------------------------------------------------------------------------
+make_dot_heatmap <- function(df, title, subtitle, extra_facet = NULL,
+                             show_block_breaks = TRUE) {
+  d_built <- build_plot_df(df)
+
+  unknown <- setdiff(unique(d_built$label), all_term_order)
+  if (length(unknown) > 0) {
+    warning("Dropping unmapped contrast labels (add to term_order if you want them): ",
+            paste(unknown, collapse = ", "))
+    d_built <- d_built %>% filter(label %in% all_term_order)
+  }
+
+  greek <- function(x) {
+    x %>%
+      stringr::str_replace_all("\\bbeta\\b",  "\u03b2") %>%
+      stringr::str_replace_all("\\balpha\\b", "\u03b1") %>%
+      stringr::str_replace_all("\\bdelta\\b", "\u03b4")
+  }
+
+  d <- d_built %>%
+    mutate(
+      outcome_label = factor(greek(outcome_label),
+                             levels = greek(rev(outcome_order))),
+      label         = factor(label, levels = all_term_order),
+      contrast      = factor(contrast, levels = c("Diagnosis", "T1D"))
+    )
+
+  facet_spec <- if (is.null(extra_facet)) {
+    facet_grid(. ~ contrast, scales = "free_x", space = "free_x")
+  } else {
+    facet_grid(reformulate("contrast", extra_facet),
+               scales = "free_x", space = "free_x")
+  }
+
+  # Vertical sub-block separators inside each panel (in addition to the thick
+  # black panel.border between panels). Per-facet using `data` arg.
+  vlines_df <- bind_rows(
+    if (show_block_breaks)
+      data.frame(contrast = "Diagnosis", xint = diag_block_breaks)
+    else data.frame(contrast = character(0), xint = numeric(0)),
+    if (show_block_breaks)
+      data.frame(contrast = "T1D", xint = t1d_block_breaks)
+    else data.frame(contrast = character(0), xint = numeric(0))
+  ) %>% mutate(contrast = factor(contrast, levels = c("Diagnosis", "T1D")))
+
+  ggplot(d, aes(x = label, y = outcome_label)) +
+    # Horizontal separators (drawn under the dots)
+    geom_hline(data = data.frame(yint = separators_minor_y),
+               aes(yintercept = yint), inherit.aes = FALSE,
+               color = "grey80", linewidth = 0.35) +
+    geom_hline(data = data.frame(yint = separators_major_y),
+               aes(yintercept = yint), inherit.aes = FALSE,
+               color = "grey55", linewidth = 0.7) +
+    # Vertical sub-block separators (per facet)
+    {if (show_block_breaks && nrow(vlines_df) > 0)
+      geom_vline(data = vlines_df, aes(xintercept = xint),
+                 inherit.aes = FALSE, color = "grey80", linewidth = 0.35)
+     else NULL} +
+    geom_point(aes(color = color_val,
+                   size  = pmin(abs(evidence), EVIDENCE_VIS_CAP)),
+               shape = 16, stroke = 0, na.rm = TRUE) +
+    facet_spec +
+    scale_color_gradient2(
+      low = "#0C447C", mid = "#F5F5F2", high = "#791F1F",
+      midpoint = 0, limits = c(-1, 1),
+      breaks = c(-1, -0.5, 0, 0.5, 1),
+      labels = c("-100%", "-50%", "0", "50%", "100%"),
+      name = "effect size\n(% of largest\nin outcome class)"
+    ) +
+    scale_size_continuous(
+      range  = SIZE_RANGE,
+      limits = c(0, EVIDENCE_VIS_CAP),
+      breaks = c(-log10(0.05), -log10(0.01), -log10(0.001)),
+      labels = c("0.05", "0.01", "0.001"),
+      name   = "p / 2(1-pd)"
+    ) +
+    labs(title = title, subtitle = subtitle, x = NULL, y = NULL) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.x      = element_text(angle = 35, hjust = 1, vjust = 1),
+      axis.text.y      = element_text(size = 8.5),
+      panel.grid.major = element_line(color = "grey92", linewidth = 0.5),
+      panel.grid.minor = element_blank(),
+      panel.border     = element_rect(color = "black", fill = NA, linewidth = 0.9),
+      panel.spacing.x  = unit(0.05, "lines"),
+      strip.text       = element_text(face = "bold", size = 11),
+      plot.title       = element_text(face = "bold"),
+      plot.subtitle    = element_text(color = "grey30", size = 8.5),
+      legend.position  = "right"
+    )
+}
+```
+
+```{r primary-plot}
+# -----------------------------------------------------------------------------
+# PRIMARY PLOT — the main paper figure with simple-effects columns
+# -----------------------------------------------------------------------------
+results_primary <- results %>%
+  filter(variant %in% c("primary", "powered", "ao"))
+
+p_primary <- make_dot_heatmap(
+  results_primary,
+  title    = "Marginal contrasts and slopes across nPOD models (simple effects, magnitude-faithful color)",
+  subtitle = paste(
+    "Color = signed effect size, normalized within outcome class to the largest |estimate| in that class.",
+    "Within a block (e.g., counts), the most-saturated cells are the dominant effects for that outcome type.",
+    "Across blocks, color is comparable in *relative* terms but not absolute units (counts: log-ratio; HTC: probability difference).",
+    "Size = signed evidence (-log10 p for glmmTMB, -log10[2(1-pd)] for ordbetareg), capped at p=0.001.",
+    sep = "\n")
+)
+
+ggsave(OUT_PLOT_PRIMARY, p_primary, width = 14, height = 11, device = cairo_pdf)
+cat("Wrote", OUT_PLOT_PRIMARY, "\n")
+p_primary
+```
+
+```{r supplementary-plot}
+# -----------------------------------------------------------------------------
+# SUPPLEMENTARY PLOT — saturated HTC variants (mid + full)
+# -----------------------------------------------------------------------------
+results_supp <- results %>%
+  filter(variant %in% c("mid", "full"),
+         contrast == "Diagnosis") %>%
+  mutate(variant = factor(variant, levels = c("mid", "full"),
+                          labels = c("mid (supplementary)",
+                                     "full (roadmap)")))
+
+if (nrow(results_supp) > 0) {
+  p_supp <- make_dot_heatmap(
+    results_supp,
+    title    = "Saturated HTC variants — for future data with more covariates",
+    subtitle = paste(
+      "Same simple-effects contrasts and magnitude-faithful color encoding",
+      "as the primary figure, computed from the more complex 'mid' and",
+      "'full' HTC ordbetareg models.",
+      sep = "\n"),
+    extra_facet = "variant"
+  )
+  ggsave(OUT_PLOT_SUPP, p_supp, width = 14, height = 8, device = cairo_pdf)
+  cat("Wrote", OUT_PLOT_SUPP, "\n")
+  p_supp
+} else {
+  cat("No mid/full variant models found; skipping supplementary plot.\n")
+}
+```
+
+```{r per-block-panels}
+# -----------------------------------------------------------------------------
+# PER-BLOCK PANELS — six supplementary figures, one per outcome class
+# -----------------------------------------------------------------------------
+# Same column set as the main figure (shared axis), filtered to one
+# outcome_family at a time. Each panel keeps its own block separators / style
+# so you can read it standalone, but the column set is the union of all the
+# main panel's columns for visual alignment if shown side by side.
+#
+# The Density and Ratio panels will be visually sparse (1 row each); that's
+# expected and intentional for the shared-axis layout.
+
+dir.create(OUT_PLOT_PER_BLOCK_DIR, showWarnings = FALSE, recursive = TRUE)
+
+per_block_specs <- list(
+  list(name = "density",       title = "Density",          height = 3.0),
+  list(name = "count",         title = "Counts",           height = 4.5),
+  list(name = "total_area",    title = "Total area",       height = 7.5),
+  list(name = "per_cell_area", title = "Per-cell area",    height = 6.5),
+  list(name = "proportion",    title = "Proportions",      height = 4.0),
+  list(name = "ratio",         title = "Beta:alpha ratio", height = 3.0)
+)
+
+for (spec in per_block_specs) {
+  block_df <- results_primary %>% filter(outcome_family == spec$name)
+  if (nrow(block_df) == 0) {
+    cat("Skipping", spec$name, "(no rows)\n"); next
+  }
+  p <- make_dot_heatmap(
+    block_df,
+    title    = paste("nPOD models —", spec$title),
+    subtitle = "Marginal contrasts and slopes (color: % of largest effect in this class)"
+  )
+  out_path <- file.path(OUT_PLOT_PER_BLOCK_DIR,
+                        paste0("npod_dot_heatmap_", spec$name, "_v3.pdf"))
+  ggsave(out_path, p, width = 14, height = spec$height, device = cairo_pdf)
+  cat("Wrote", out_path, "\n")
+}
+```
+
+```{r}
+# -----------------------------------------------------------------------------
+# DIAGNOSTIC — cells with NA values (terms genuinely absent from a model)
+# -----------------------------------------------------------------------------
+results_primary %>%
+  filter(is.na(estimate) | is.na(std.error) | is.na(evidence)) %>%
+  count(model_id, label) %>%
+  print(n = Inf)
+```
+
+```{r}
+sessionInfo()
+```

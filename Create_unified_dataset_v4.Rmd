@@ -1,0 +1,1455 @@
+---
+title: "Unified Dataset Pipeline"
+output: html_document
+date: "2026-03-22"
+---
+
+This single Rmd produces **all** project datasets in one run:
+
+| Output file | Description |
+|---|---|
+| `no_cutoff_data.csv` | All islets (Islet.Cells > 0), no size filter, with location |
+| `full_data.csv` | Size-filtered (15 ≤ Islet.Cells, log ≤ 5.5), with location |
+| `quad_data.csv` | Quad-stain subset of full_data, with location |
+| `area_data_joined.csv` | Cell-level area measurements joined to count data |
+| `density_data.csv` | Image-level islet density (islets / tissue area) |
+| `ki67_data.csv` | Ki-67 proliferation data matched to count islets, with demographics |
+| `ki67_data_t1d.csv` | Ki-67 data, T1D donors only |
+
+**Data sources required in working directory or specified paths:**
+
+- `corrected nPOD Data/` — folder of per-donor HALO CSVs (count data)
+- `F:/Work/nPOD_final_v3/area_data/` — folder of per-donor HALO area CSVs
+- `matched_tissue_classification_images.csv` — verified image list
+- `No_stain_data_stain_added.xlsx` — stain fix lookup
+- `remove_list.xlsx` — manual islet exclusion list
+- `01282025_Full.nPOD.csv` — donor demographics
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 8)
+
+packages <- c("tidyverse", "readr", "stringr", "readxl", "purrr", "writexl",
+              "janitor")
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+dir.create("Data", showWarnings = FALSE)
+```
+
+---
+
+# Part A: Core Count Pipeline (produces no_cutoff, full_data, quad_data)
+
+## A1. Read and combine all count CSVs
+
+```{r a1_read_count_csvs}
+count_base_path <- "corrected nPOD Data"
+
+csv_files <- list.files(count_base_path, pattern = "\\.csv$",
+                        recursive = TRUE, full.names = TRUE)
+csv_files <- csv_files[!grepl("Total_Summary_Results\\.csv$", csv_files)]
+
+cat("Found", length(csv_files), "count CSV files\n")
+
+Data_raw <- csv_files %>%
+  lapply(function(file) {
+    tryCatch({
+      df <- read.csv(file, stringsAsFactors = FALSE)
+      df$source_file <- basename(file)
+      df$folder_id <- basename(dirname(dirname(dirname(dirname(file)))))
+      df$anatomical_location <- basename(dirname(dirname(dirname(file))))
+      return(df)
+    }, error = function(e) {
+      cat("Error reading file:", file, "\n", e$message, "\n")
+      return(NULL)
+    })
+  }) %>%
+  bind_rows()
+
+# Fix HPAP folder IDs
+Data_raw <- Data_raw %>%
+  mutate(folder_id = case_when(
+    folder_id == "030" ~ "HPAP030",
+    folder_id == "041" ~ "HPAP041",
+    folder_id == "048" ~ "HPAP048",
+    folder_id == "068" ~ "HPAP068",
+    folder_id == "078" ~ "HPAP078",
+    TRUE ~ folder_id
+  ))
+
+length(unique(Data_raw$folder_id))
+```
+
+```{r}
+Data_raw$pct_sum <- Data_raw$X..T1D.AI.Phenotyper...Beta.Cell.Positive.Cells +
+  Data_raw$X..T1D.AI.Phenotyper...Alpha.Cell.Positive.Cells +
+  Data_raw$X..T1D.AI.Phenotyper...Delta.Cell.Positive.Cells +
+  Data_raw$X..T1D.AI.Phenotyper...PP.Cell.Positive.Cells +
+  Data_raw$X..T1D.AI.Phenotyper...Acinar.Cell.Positive.Cells
+
+summary(Data_raw$pct_sum)
+```
+
+
+## A2. Save location columns before column-dropping
+
+```{r a2_location_lookup}
+location_lookup <- Data_raw %>%
+  mutate(ImageID = str_extract(source_file, "\\d+")) %>%
+  dplyr::select(
+    source_file,
+    Object.Id,
+    ImageID,
+    Region.Area..μm..,
+    Avg.Cell.Area..um.2.,
+    Region.Perimeter..μm.
+  )
+
+cat("Location lookup:", nrow(location_lookup), "rows\n")
+```
+
+## A3. Drop junk columns
+
+```{r a3_drop_columns}
+phenotyper_raw <- Data_raw %>%
+  mutate(ImageID = str_extract(source_file, "\\d+"))
+
+Data <- Data_raw %>%
+  dplyr::select(-matches(
+    "hema|area|negative|nucleus|weak|moderate|strong|score|membrane|cytoplasm|nuclei|positive",
+    ignore.case = TRUE
+  )) %>%
+  dplyr::select(-starts_with("X"))
+
+rm(Data_raw)
+
+length(unique(Data$folder_id))
+```
+
+## A4. Select and summarize cell counts
+
+```{r a4_cell_counts}
+Data2 <- Data %>%
+  mutate(ImageID = str_extract(source_file, "\\d+")) %>%
+  dplyr::select(
+    source_file,
+    Object.Id,
+    Donor = folder_id,
+    Region = anatomical_location,
+    Total.Cells,
+    Algorithm.Name,
+    matches("Phenotyper", ignore.case = TRUE),
+    ImageID
+  )
+
+rm(Data)
+
+Data_summed <- Data2 %>%
+  mutate(across(matches("Phenotyper", ignore.case = TRUE), as.numeric)) %>%
+  mutate(
+    Count.ins    = rowSums(dplyr::select(., matches("Beta(\\.Cell\\.Cells|\\.Cells)$",  ignore.case = TRUE)), na.rm = TRUE),
+    Count.glu    = rowSums(dplyr::select(., matches("Alpha(\\.Cell\\.Cells|\\.Cells)$", ignore.case = TRUE)), na.rm = TRUE),
+    Count.soma   = rowSums(dplyr::select(., matches("Delta(\\.Cell\\.Cells|\\.Cells)$", ignore.case = TRUE)), na.rm = TRUE),
+    Count.PP     = rowSums(dplyr::select(., matches("PP(\\.Cell\\.Cells|\\.Cells)$",    ignore.case = TRUE)), na.rm = TRUE),
+    Count.Acinar = rowSums(dplyr::select(., matches("Acinar(\\.Cell\\.Cells|\\.Cells)$", ignore.case = TRUE)), na.rm = TRUE)
+  ) %>%
+  mutate(Stain = case_when(
+    str_detect(Algorithm.Name, regex("Single", ignore_case = TRUE)) ~ "Single",
+    str_detect(Algorithm.Name, regex("Double", ignore_case = TRUE)) ~ "Double",
+    str_detect(Algorithm.Name, regex("Quad",   ignore_case = TRUE)) ~ "Quad",
+    TRUE ~ NA_character_
+  )) %>%
+  dplyr::select(
+    Donor, ImageID, Object.Id, Region, Stain, Algorithm.Name,
+    source_file, Total.Cells, matches("Count", ignore.case = TRUE)
+  ) %>%
+  mutate(
+    Islet.Cells        = Count.ins + Count.glu + Count.soma + Count.PP,
+    non_primary_cells   = Total.Cells - Islet.Cells - Count.Acinar,
+    Percent.ins    = Count.ins  / Islet.Cells,
+    Percent.glu    = Count.glu  / Islet.Cells,
+    Percent.soma   = Count.soma / Islet.Cells,
+    Percent.PP     = Count.PP   / Islet.Cells,
+    Percent.other  = non_primary_cells / (Islet.Cells + non_primary_cells)
+  )
+
+length(unique(Data_summed$Donor))
+
+rm(Data2)
+```
+
+## A5. Fix stain NAs
+
+```{r a5_fix_stain}
+Stain_info <- read_xlsx("No_stain_data_stain_added.xlsx")
+
+Data_summed <- Data_summed %>%
+  left_join(Stain_info %>% dplyr::select(ImageID, Stain_new = Stain), by = "ImageID") %>%
+  mutate(Stain = if_else(is.na(Stain), Stain_new, Stain)) %>%
+  dplyr::select(-Stain_new)
+
+rm(Stain_info)
+
+length(unique(Data_summed$Donor))
+```
+
+## A6. Apply remove_list
+
+```{r a6_remove_list}
+remove_list <- read_excel("remove_list.xlsx")
+
+remove_list <- remove_list %>%
+  fill(ImageID) %>%
+  mutate(Object.Id = as.numeric(Object.Id),
+         ImageID   = as.character(ImageID))
+
+full_data_clean <- Data_summed %>%
+  anti_join(remove_list, by = c("ImageID", "Object.Id"))
+
+cat("Rows before remove_list:", nrow(Data_summed), "\n")
+cat("Rows after  remove_list:", nrow(full_data_clean), "\n")
+
+length(unique(full_data_clean$Donor))
+
+rm(remove_list, Data_summed)
+```
+
+## A7. Join demographics
+
+```{r a7_demographics}
+original_data <- as.data.frame(read_csv("01282025_Full.nPOD.csv"))
+
+donor_info <- original_data %>%
+  dplyr::select(Donor, Gender, Age, AgeCat, Diagnosis, Disease.Duration) %>%
+  distinct(Donor, .keep_all = TRUE) %>%
+  mutate(Donor = as.character(Donor))
+
+full_data_clean <- full_data_clean %>%
+  mutate(Donor = as.character(Donor)) %>%
+  left_join(donor_info, by = "Donor")
+
+length(unique(full_data_clean$Donor))
+
+rm(donor_info)
+```
+
+## A8. Fix demographics, filter donors, recode
+
+```{r a8_fix_demographics}
+full_data_clean <- full_data_clean %>%
+  # Fix donor 6250
+  mutate(
+    Diagnosis = if_else(Donor == "6250", "No.Diagnosis", Diagnosis),
+    AgeCat    = if_else(Donor == "6250", "20-40_years",  AgeCat),
+    Gender    = if_else(Donor == "6250", "Male",         Gender),
+    Age       = if_else(Donor == "6250", 40,             Age)
+  ) %>%
+  rename(Sex = Gender) %>%
+  # Remove excluded donors
+  filter(!Donor %in% c("6021", "6102", "6127")) %>% # Removed because they are older than 40
+  # Recode Diagnosis to ND/T1D
+  mutate(Diagnosis = if_else(Diagnosis == "T1D", "T1D", "ND")) %>%
+  # Fix AgeCat typos
+  mutate(AgeCat = dplyr::recode(AgeCat,
+    "20-40years"   = "20-40_years",
+    "20-40_yeasrs" = "20-40_years",
+    "20-40"        = "20-40_years"
+  ))
+
+# Disease duration: ND = 0, T1D with 0 → 0.1
+full_data_clean$Disease.Duration[full_data_clean$Diagnosis == "ND"] <- 0
+full_data_clean$Disease.Duration[
+  full_data_clean$Diagnosis == "T1D" & full_data_clean$Disease.Duration == 0
+] <- 0.1
+
+length(unique(full_data_clean$Donor))
+length(unique(full_data_clean$ImageID))
+nrow(full_data_clean)
+
+full_data_clean %>%
+  group_by(Stain) %>%
+  summarise(n_donors = n_distinct(Donor))
+
+donors_with_na <- unique(full_data_clean$Donor[is.na(full_data_clean$Stain)])
+
+full_data_clean %>%
+  filter(Donor %in% donors_with_na) %>%
+  group_by(Donor) %>%
+  summarise(
+    n_NA      = sum(is.na(Stain)),
+    n_nonNA   = sum(!is.na(Stain)),
+    stains    = paste(sort(unique(Stain[!is.na(Stain)])), collapse = ", ")
+  )
+
+full_data_clean %>%
+  group_by(Donor) %>%
+  filter(any(is.na(Stain)) & any(!is.na(Stain))) %>%
+  arrange(Donor)
+```
+
+## A9. Apply cutoffs, join location, and save datasets
+
+```{r a9_cutoffs_and_save}
+# --- no_cutoff_data: all islets with Islet.Cells > 0 ---
+no_cutoff_data <- full_data_clean %>%
+  filter(Islet.Cells > 0) %>%
+  mutate(log_Islet.Cells = log(as.numeric(Islet.Cells))) %>%
+  mutate(
+    Diagnosis       = factor(Diagnosis, levels = c("ND", "T1D")),
+    Region          = factor(Region, levels = c("Head", "Body", "Tail")),
+    Sex             = factor(Sex, levels = c("Female", "Male")),
+    Donor           = factor(Donor),
+    ImageID         = factor(ImageID)
+  ) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  # Join location variables
+  left_join(
+    location_lookup %>% dplyr::select(source_file, Object.Id,
+                                       Region.Area..μm..,
+                                       Avg.Cell.Area..um.2.,
+                                       Region.Perimeter..μm.),
+    by = c("source_file", "Object.Id")
+  )
+
+write_csv(no_cutoff_data, "Data/no_cutoff_data.csv")
+saveRDS(no_cutoff_data, "Data/no_cutoff_data.rds")
+cat("Saved: no_cutoff_data.csv —", nrow(no_cutoff_data), "rows,",
+    length(unique(no_cutoff_data$Donor)), "donors\n")
+
+no_cutoff_data_t1d <- no_cutoff_data %>%
+  filter(Diagnosis == "T1D") %>% 
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  )
+
+write_csv(no_cutoff_data_t1d, "Data/no_cutoff_data_t1d.csv")
+saveRDS(no_cutoff_data_t1d, "Data/no_cutoff_data_t1d.rds")
+cat("Saved: no_cutoff_data_t1d.csv —", nrow(no_cutoff_data_t1d), "rows,",
+    length(unique(no_cutoff_data_t1d$Donor)), "donors\n")
+
+# --- full_data: size-filtered ---
+full_data <- no_cutoff_data %>%
+  filter(log_Islet.Cells <= 5.5) %>%
+  filter(Islet.Cells >= 15) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(full_data, "Data/cutoff_data.csv")
+saveRDS(full_data, "Data/cutoff_data.rds")
+cat("Saved: cutoff_data.csv —", nrow(full_data), "rows,",
+    length(unique(full_data$Donor)), "donors\n")
+
+full_data_t1d <- full_data %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(full_data_t1d, "Data/cutoff_data_t1d.csv")
+saveRDS(full_data_t1d, "Data/cutoff_data_t1d.rds")
+cat("Saved: cutoff_data_t1d.csv —", nrow(full_data_t1d), "rows,",
+    length(unique(full_data_t1d$Donor)), "donors\n")
+
+ratio_data <- full_data %>%
+  filter(Stain != "Single") %>%
+  filter(Donor != "6473") %>%
+  filter(Count.ins > 0 | Count.glu > 0) %>%
+  mutate(beta_alpha_ratio = Count.ins / (Count.ins + Count.glu)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(ratio_data, "Data/ratio_data.csv")
+saveRDS(ratio_data, "Data/ratio_data.rds")
+cat("Saved: ratio_data.csv —", nrow(ratio_data), "rows,",
+    length(unique(ratio_data$Donor)), "donors\n")
+
+ratio_data_t1d <- ratio_data %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(ratio_data_t1d, "Data/ratio_data_t1d.csv")
+saveRDS(ratio_data_t1d, "Data/ratio_data_t1d.rds")
+cat("Saved: ratio_data_t1d.csv —", nrow(ratio_data_t1d), "rows,",
+    length(unique(ratio_data_t1d$Donor)), "donors\n")
+
+# --- quad_data: Quad stain only ---
+quad_data <- full_data %>%
+  filter(Stain == "Quad") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(quad_data, "Data/quad_data.csv")
+saveRDS(quad_data, "Data/quad_data.rds")
+cat("Saved: quad_data.csv —", nrow(quad_data), "rows,",
+    length(unique(quad_data$Donor)), "donors\n")
+
+quad_data_t1d <- quad_data %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(quad_data_t1d, "Data/quad_data_t1d.csv")
+saveRDS(quad_data_t1d, "Data/quad_data_t1d.rds")
+cat("Saved: quad_data_t1d.csv —", nrow(quad_data_t1d), "rows,",
+    length(unique(quad_data_t1d$Donor)), "donors\n")
+
+
+```
+
+---
+
+# Part B: Area Data (cell-level area measurements)
+
+## B1. Read and harmonize area CSVs
+
+```{r b1_read_area_data}
+area_base_path <- "F:/Work/nPOD_final_v3/area_data"
+
+area_files <- Sys.glob(file.path(area_base_path, "*/Halo archive*/ObjectData/*.csv"))
+area_files <- area_files[!grepl("Total_Summary_Results", area_files, ignore.case = TRUE)]
+
+cat("Found", length(area_files), "area data files\n")
+
+read_and_harmonize <- function(filepath) {
+  df <- read_csv(filepath, show_col_types = FALSE)
+
+  colnames(df) <- gsub("^\uFEFF", "", colnames(df))
+  colnames(df) <- make.names(colnames(df))
+
+  is_quad   <- grepl("Quad",   filepath, ignore.case = TRUE)
+  is_double <- grepl("Double", filepath, ignore.case = TRUE)
+
+  df$ImageID <- as.integer(str_extract(df$Image.Location, "[0-9]+(?=\\.svs)"))
+  df$Donor   <- str_extract(filepath, "[^/\\\\]+(?=[/\\\\]Halo archive)")
+
+  if ("Object.ID" %in% names(df) && !"Object.Id" %in% names(df)) {
+    df$Object.Id <- df$Object.ID
+  }
+
+  cols <- names(df)
+  ins_col  <- cols[grepl("^Ins.*Area.*um",  cols, ignore.case = TRUE) & !grepl("Weak|Moderate|Strong", cols, ignore.case = TRUE)]
+  glu_col  <- cols[grepl("^Glu.*Area.*um",  cols, ignore.case = TRUE) & !grepl("Weak|Moderate|Strong", cols, ignore.case = TRUE)]
+  soma_col <- cols[grepl("^Soma.*Area.*um", cols, ignore.case = TRUE) & !grepl("Weak|Moderate|Strong", cols, ignore.case = TRUE)]
+  pp_col   <- cols[grepl("^PP.*Area.*um",   cols, ignore.case = TRUE) & !grepl("Weak|Moderate|Strong", cols, ignore.case = TRUE)]
+
+  result <- data.frame(
+    Donor      = df$Donor,
+    ImageID    = df$ImageID,
+    Object.Id  = df$Object.Id,
+    stain_type = ifelse(is_quad, "Quad", ifelse(is_double, "Double", "Unknown")),
+    stringsAsFactors = FALSE
+  )
+
+  result$ins_area  <- if (length(ins_col)  == 1) df[[ins_col]]  else NA_real_
+  result$glu_area  <- if (length(glu_col)  == 1) df[[glu_col]]  else NA_real_
+  result$soma_area <- if (length(soma_col) == 1) df[[soma_col]] else NA_real_
+  result$pp_area   <- if (length(pp_col)   == 1) df[[pp_col]]   else NA_real_
+
+  if (is_double) {
+    result$soma_area <- NA_real_
+    result$pp_area   <- NA_real_
+  }
+
+  result$source_file <- basename(filepath)
+  return(result)
+}
+
+all_area_data <- map_dfr(area_files, function(f) {
+  tryCatch(read_and_harmonize(f),
+           error = function(e) {
+             warning(paste("Error reading:", basename(f), "-", e$message))
+             return(NULL)
+           })
+})
+
+cat("Area data:", nrow(all_area_data), "rows from",
+    length(unique(all_area_data$source_file)), "files\n")
+```
+
+
+## B2. Fix donor IDs and filter
+
+```{r b2_fix_area_donors}
+all_area_data <- all_area_data %>%
+  mutate(Donor = case_when(
+    Donor == "6343" ~ "6434",
+    TRUE ~ Donor
+  )) %>%
+  filter(!Donor %in% c("6021", "6102", "6127"))
+```
+
+## B3. Filter to verified images
+
+```{r b3_verified_images}
+# Read area summary files
+area_summary_files <- Sys.glob(file.path(area_base_path, "*/Halo archive*/Total_Summary_Results.csv"))
+
+summary_area <- map_dfr(area_summary_files, function(f) {
+  tryCatch({
+    df <- read_csv(f, show_col_types = FALSE)
+    df$source_file <- basename(dirname(f))
+    return(df)
+  }, error = function(e) {
+    warning(paste("Error reading:", f))
+    return(NULL)
+  })
+})
+
+# Read count summary files
+count_summary_files <- list.files(count_base_path, pattern = "Total_Summary_Results\\.csv$",
+                                   recursive = TRUE, full.names = TRUE)
+
+summary_count <- map_dfr(count_summary_files, function(f) {
+  tryCatch({
+    df <- read_csv(f, show_col_types = FALSE)
+    df$source_file <- basename(dirname(f))
+    return(df)
+  }, error = function(e) {
+    warning(paste("Error reading:", f))
+    return(NULL)
+  })
+})
+
+cat("Area summaries:", nrow(summary_area), "rows\n")
+cat("Count summaries:", nrow(summary_count), "rows\n")
+
+# Join on Image Tag and keep only images where tissue classification matches exactly
+summary_compare <- summary_area %>%
+  inner_join(summary_count, by = "Image Tag", suffix = c(".area", ".count"))
+
+matched_tags <- summary_compare %>%
+  filter(
+    `Classified Area (mm²).area` == `Classified Area (mm²).count`,
+    `Acinar Area (mm²).area`     == `Acinar Area (mm²).count`,
+    `Glass Area (mm²).area`      == `Glass Area (mm²).count`
+  ) %>%
+  pull(`Image Tag`)
+
+matched_image_ids <- as.integer(str_extract(matched_tags, "\\d+"))
+
+cat("Images with matching tissue classification:", length(matched_image_ids),
+    "out of", nrow(summary_compare), "compared\n")
+
+# Filter area data to verified images only
+n_before <- nrow(all_area_data)
+all_area_data <- all_area_data %>%
+  filter(ImageID %in% matched_image_ids)
+
+cat("Filtered to verified images:", nrow(all_area_data), "rows\n")
+cat("Removed", n_before - nrow(all_area_data), "rows from unverified images\n")
+
+# Clean up
+rm(summary_area, summary_count, summary_compare, matched_tags, matched_image_ids); gc()
+```
+
+## B4. Join area data to count data
+
+```{r b4_join_area_to_counts}
+# Use no_cutoff_data as the count backbone (already has demographics, location, etc.)
+count_for_area <- no_cutoff_data %>%
+  mutate(
+    Donor    = as.character(Donor),
+    ImageID  = as.integer(as.character(ImageID)),
+    Object.Id = as.integer(Object.Id)
+  ) %>%
+  dplyr::select(
+    Donor, Diagnosis, Disease.Duration, Disease.Duration_c, Sex, Age, 
+    age_at_onset, log_Islet.Cells, ImageID, Object.Id, Region,
+    Count.ins, Count.glu, Count.soma, Count.PP, Islet.Cells,
+    Percent.ins, Percent.glu, Percent.soma, Percent.PP
+  )
+
+all_area_data <- all_area_data %>%
+  mutate(
+    Donor     = as.character(Donor),
+    ImageID   = as.integer(ImageID),
+    Object.Id = as.integer(Object.Id)
+  )
+
+area_data_joined <- count_for_area %>%
+  inner_join(all_area_data, by = c("Donor", "ImageID", "Object.Id")) %>%
+  mutate(stain_rank = case_when(
+    stain_type == "Quad" ~ 1,
+    stain_type == "Double" ~ 2,
+    TRUE ~ 3
+  )) %>%
+  arrange(stain_rank) %>%
+  distinct(ImageID, Object.Id, .keep_all = TRUE) %>%
+  select(-stain_rank) %>%
+  mutate(
+    ins_area  = if_else(Count.ins  > 0 & ins_area  == 0, NA_real_, ins_area),
+    glu_area  = if_else(Count.glu  > 0 & glu_area  == 0, NA_real_, glu_area),
+    soma_area = if_else(Count.soma > 0 & soma_area == 0, NA_real_, soma_area),
+    pp_area   = if_else(Count.PP   > 0 & pp_area   == 0, NA_real_, pp_area)
+  ) %>%
+  mutate(
+    ins_area_per_cell  = ifelse(Count.ins  > 0, ins_area  / Count.ins,  NA_real_),
+    glu_area_per_cell  = ifelse(Count.glu  > 0, glu_area  / Count.glu,  NA_real_),
+    soma_area_per_cell = ifelse(Count.soma > 0, soma_area / Count.soma, NA_real_),
+    pp_area_per_cell   = ifelse(Count.PP   > 0, pp_area   / Count.PP,   NA_real_)
+  ) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined, "Data/area_data.csv")
+saveRDS(area_data_joined, "Data/area_data.rds")
+cat("Saved: area_data_joined.csv —", nrow(area_data_joined), "rows,",
+    length(unique(area_data_joined$Donor)), "donors,",
+    length(unique(area_data_joined$ImageID)), "images\n")
+
+area_data_joined_t1d <- area_data_joined %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_t1d, "Data/area_data_t1d.csv")
+saveRDS(area_data_joined_t1d, "Data/area_data_t1d.rds")
+cat("Saved: area_data_joined_t1d.csv —", nrow(area_data_joined_t1d), "rows,",
+    length(unique(area_data_joined_t1d$Donor)), "donors,",
+    length(unique(area_data_joined_t1d$ImageID)), "images\n")
+```
+
+## B5 Area subsets
+
+### Singlets
+
+```{r}
+area_data_joined_singlets <- area_data_joined %>%
+  filter(Islet.Cells == 1) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_singlets, "Data/area_data_singlets.csv")
+saveRDS(area_data_joined_singlets, "Data/area_data_singlets.rds")
+cat("Saved: area_data_joined_singlets.csv —", nrow(area_data_joined_singlets), "rows,",
+    length(unique(area_data_joined_singlets$Donor)), "donors,",
+    length(unique(area_data_joined_singlets$ImageID)), "images\n")
+
+area_data_joined_singlets_t1d <- area_data_joined_singlets %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_singlets_t1d, "Data/area_data_singlets_t1d.csv")
+saveRDS(area_data_joined_singlets_t1d, "Data/area_data_singlets_t1d.rds")
+cat("Saved: area_data_joined_singlets_t1d.csv —", nrow(area_data_joined_singlets_t1d), "rows,",
+    length(unique(area_data_joined_singlets_t1d$Donor)), "donors,",
+    length(unique(area_data_joined_singlets_t1d$ImageID)), "images\n")
+```
+
+### Endocrine Objects
+
+```{r}
+area_data_joined_endobs <- area_data_joined %>%
+  filter(Islet.Cells >= 2 & Islet.Cells <= 14) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_endobs, "Data/area_data_endobs.csv")
+saveRDS(area_data_joined_endobs, "Data/area_data_endobs.rds")
+cat("Saved: area_data_joined_endobs.csv —", nrow(area_data_joined_endobs), "rows,",
+    length(unique(area_data_joined_endobs$Donor)), "donors,",
+    length(unique(area_data_joined_endobs$ImageID)), "images\n")
+
+area_data_joined_endobs_t1d <- area_data_joined_endobs %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_endobs_t1d, "Data/area_data_endobs_t1d.csv")
+saveRDS(area_data_joined_endobs_t1d, "Data/area_data_endobs_t1d.rds")
+cat("Saved: area_data_joined_endobs_t1d.csv —", nrow(area_data_joined_endobs_t1d), "rows,",
+    length(unique(area_data_joined_endobs_t1d$Donor)), "donors,",
+    length(unique(area_data_joined_endobs_t1d$ImageID)), "images\n")
+```
+
+### Islets
+
+```{r}
+area_data_joined_islets <- area_data_joined %>%
+  filter(Islet.Cells >= 15 & log_Islet.Cells <= 5.5) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_islets, "Data/area_data_islets.csv")
+saveRDS(area_data_joined_islets, "Data/area_data_islets.rds")
+cat("Saved: area_data_joined_islets.csv —", nrow(area_data_joined_islets), "rows,",
+    length(unique(area_data_joined_islets$Donor)), "donors,",
+    length(unique(area_data_joined_islets$ImageID)), "images\n")
+
+area_data_joined_islets_t1d <- area_data_joined_islets %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(area_data_joined_islets_t1d, "Data/area_data_islets_t1d.csv")
+saveRDS(area_data_joined_islets_t1d, "Data/area_data_islets_t1d.rds")
+cat("Saved: area_data_joined_islets_t1d.csv —", nrow(area_data_joined_islets_t1d), "rows,",
+    length(unique(area_data_joined_islets_t1d$Donor)), "donors,",
+    length(unique(area_data_joined_islets_t1d$ImageID)), "images\n")
+```
+
+### Combined
+
+```{r}
+beta_combined <- area_data_joined %>%
+  filter(!is.na(ins_area) & ins_area > 0 & Count.ins > 0) %>%
+  mutate(log_ins_area = log(ins_area)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(beta_combined, "Data/area_data_beta_combined.csv")
+saveRDS(beta_combined, "Data/area_data_beta_combined.rds")
+cat("Saved: area_data_beta_combined.csv —", nrow(beta_combined), "rows,",
+    length(unique(beta_combined$Donor)), "donors,",
+    length(unique(beta_combined$ImageID)), "images\n")
+
+beta_combined_t1d <- beta_combined %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(beta_combined_t1d, "Data/area_data_beta_combined_t1d.csv")
+saveRDS(beta_combined_t1d, "Data/area_data_beta_combined_t1d.rds")
+cat("Saved: area_data_beta_combined_t1d.csv —", nrow(beta_combined_t1d), "rows,",
+    length(unique(beta_combined_t1d$Donor)), "donors,",
+    length(unique(beta_combined_t1d$ImageID)), "images\n")
+
+
+
+
+alpha_combined <- area_data_joined %>%
+  filter(!is.na(glu_area) & glu_area > 0 & Count.glu > 0) %>%
+  mutate(log_glu_area = log(glu_area)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(alpha_combined, "Data/area_data_alpha_combined.csv")
+saveRDS(alpha_combined, "Data/area_data_alpha_combined.rds")
+cat("Saved: area_data_alpha_combined.csv —", nrow(alpha_combined), "rows,",
+    length(unique(alpha_combined$Donor)), "donors,",
+    length(unique(alpha_combined$ImageID)), "images\n")
+
+alpha_combined_t1d <- alpha_combined %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(alpha_combined_t1d, "Data/area_data_alpha_combined_t1d.csv")
+saveRDS(alpha_combined_t1d, "Data/area_data_alpha_combined_t1d.rds")
+cat("Saved: area_data_alpha_combined_t1d.csv —", nrow(alpha_combined_t1d), "rows,",
+    length(unique(alpha_combined_t1d$Donor)), "donors,",
+    length(unique(alpha_combined_t1d$ImageID)), "images\n")
+
+
+
+
+delta_combined <- area_data_joined %>%
+  filter(!is.na(soma_area) & soma_area > 0 & Count.soma > 0) %>%
+  mutate(log_soma_area = log(soma_area)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(delta_combined, "Data/area_data_delta_combined.csv")
+saveRDS(delta_combined, "Data/area_data_delta_combined.rds")
+cat("Saved: area_data_delta_combined.csv —", nrow(delta_combined), "rows,",
+    length(unique(delta_combined$Donor)), "donors,",
+    length(unique(delta_combined$ImageID)), "images\n")
+
+delta_combined_t1d <- delta_combined %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(delta_combined_t1d, "Data/area_data_delta_combined_t1d.csv")
+saveRDS(delta_combined_t1d, "Data/area_data_delta_combined_t1d.rds")
+cat("Saved: area_data_delta_combined_t1d.csv —", nrow(delta_combined_t1d), "rows,",
+    length(unique(delta_combined_t1d$Donor)), "donors,",
+    length(unique(delta_combined_t1d$ImageID)), "images\n")
+
+
+
+
+pp_combined <- area_data_joined %>%
+  filter(!is.na(pp_area) & pp_area > 0 & Count.PP > 0) %>%
+  mutate(log_pp_area = log(pp_area)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(pp_combined, "Data/area_data_pp_combined.csv")
+saveRDS(pp_combined, "Data/area_data_pp_combined.rds")
+cat("Saved: area_data_pp_combined.csv —", nrow(pp_combined), "rows,",
+    length(unique(pp_combined$Donor)), "donors,",
+    length(unique(pp_combined$ImageID)), "images\n")
+
+pp_combined_t1d <- pp_combined %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    log_Islet.Cells_c = if_else(
+      Islet.Cells == 1,
+      0,
+      log_Islet.Cells - mean(log_Islet.Cells[Islet.Cells > 1])
+    )
+  )
+
+write_csv(pp_combined_t1d, "Data/area_data_pp_combined_t1d.csv")
+saveRDS(pp_combined_t1d, "Data/area_data_pp_combined_t1d.rds")
+cat("Saved: area_data_pp_combined_t1d.csv —", nrow(pp_combined_t1d), "rows,",
+    length(unique(pp_combined_t1d$Donor)), "donors,",
+    length(unique(pp_combined_t1d$ImageID)), "images\n")
+```
+
+---
+
+# Part C: Density Data (image-level islet density)
+
+## C1. Read Total_Summary_Results files
+
+```{r c1_read_summary_files}
+count_summary_files <- list.files(count_base_path,
+                                  pattern = "Total_Summary_Results\\.csv$",
+                                  recursive = TRUE, full.names = TRUE)
+
+summary_count <- map_dfr(count_summary_files, function(f) {
+  tryCatch({
+    df <- read_csv(f, show_col_types = FALSE)
+    df$source_file <- basename(dirname(f))
+    df$full_path <- f
+    return(df)
+  }, error = function(e) {
+    warning(paste("Error reading:", f))
+    return(NULL)
+  })
+})
+
+cat("Summary files loaded:", nrow(summary_count), "rows\n")
+```
+
+## C2. Coalesce column name variants and compute tissue area
+
+```{r c2_compute_tissue_area}
+density <- summary_count %>%
+  mutate(
+    `Duct Area (mm²)` = coalesce(
+      `Ducts Area (mm²)`, `Duct Area (mm²)`,
+      `Ducts/Arteries Area (mm²)`, `duct Area (mm²)`
+    ),
+    `Glass Area (mm²)` = coalesce(`glass Area (mm²)`, `Glass Area (mm²)`),
+    `Tissue Area (μm²)` = coalesce(`Tissue Area (μm²)`, `Tissue Area Analyzed (μm²)`)
+  ) %>%
+  mutate(
+    `Duct Area (mm²)` = replace_na(`Duct Area (mm²)`, 0),
+    full_tissue_area   = `Classified Area (mm²)` - `Duct Area (mm²)` - `Glass Area (mm²)`,
+    ImageID            = as.character(str_remove(`Image Tag`, "\\.svs$"))
+  )
+```
+
+## C3. Count islets per image and compute density
+
+```{r c3_islet_density}
+# Use full_data (size-filtered) to count islets per image
+islet_counts <- full_data %>%
+  mutate(ImageID = as.character(ImageID)) %>%
+  group_by(ImageID) %>%
+  summarise(
+    islet_count = n(),
+    Donor       = first(as.character(Donor)),
+    .groups     = "drop"
+  )
+
+density_result <- density %>%
+  left_join(islet_counts, by = "ImageID") %>%
+  mutate(islet_density = islet_count / full_tissue_area) %>%
+  dplyr::select(ImageID, full_tissue_area, islet_density, islet_count, Donor) %>%
+  filter(!is.na(islet_density)) 
+
+cat("Density computed for", nrow(density_result), "images,",
+    length(unique(density_result$Donor)), "donors\n")
+```
+
+## C4. Join demographics to density and save
+
+```{r c4_save_density}
+density_result$ImageID <- as.numeric(density_result$ImageID)
+
+density_dataset <- density_result %>%
+  left_join(
+    full_data %>%
+      mutate(ImageID = as.numeric(as.character(ImageID)),
+             Donor   = as.character(Donor)) %>%
+      dplyr::select(ImageID, Donor, Region, Age, age_at_onset, Sex, Diagnosis, Disease.Duration) %>%
+      distinct(),
+    by = c("ImageID", "Donor")
+  ) %>%
+  # Drop images whose islets were all size-filtered out (so the join produced NA demographics)
+  { 
+    dropped <- sum(is.na(.$Diagnosis))
+    if (dropped > 0) cat("Dropping", dropped, "images with no islets surviving the size filter\n")
+    filter(., !is.na(Diagnosis))
+  } %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  )
+
+write_csv(density_dataset, "Data/density_data.csv")
+saveRDS(density_dataset, "Data/density_data.rds")
+cat("Saved: density_data.csv —", nrow(density_dataset), "rows,",
+    length(unique(density_dataset$Donor)), "donors\n")
+
+density_dataset_t1d <- density_dataset %>%
+  filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  ) 
+
+write_csv(density_dataset_t1d, "Data/density_data_t1d.csv")
+saveRDS(density_dataset_t1d, "Data/density_data_t1d.rds")
+cat("Saved: density_data_t1d.csv —", nrow(density_dataset_t1d), "rows,",
+    length(unique(density_dataset_t1d$Donor)), "donors\n")
+
+unique(density_dataset$Donor)
+```
+
+# Part D: Ki-67 Proliferation Data
+
+## D1. Read and combine all Ki-67 CSVs
+
+```{r d1_read_ki67_csvs}
+ki67_base_path <- "ki67_data"
+
+ki67_files <- list.files(ki67_base_path, pattern = "\\.csv$",
+                         recursive = TRUE, full.names = TRUE)
+ki67_files <- ki67_files[!grepl("Total_Summary_Results\\.csv$", ki67_files)]
+
+cat("Found", length(ki67_files), "ki67 CSV files\n")
+
+ki67_raw <- ki67_files %>%
+  lapply(function(file) {
+    tryCatch({
+      df <- read.csv(file, stringsAsFactors = FALSE)
+      df$source_file <- basename(file)
+      df$folder_id <- basename(dirname(dirname(dirname(dirname(file)))))
+      df$anatomical_location <- basename(dirname(dirname(dirname(file))))
+      return(df)
+    }, error = function(e) {
+      cat("Error reading file:", file, "\n", e$message, "\n")
+      return(NULL)
+    })
+  }) %>%
+  bind_rows() %>%
+  mutate(
+    folder_id = case_when(
+      folder_id == "030" ~ "HPAP030",
+      folder_id == "041" ~ "HPAP041",
+      folder_id == "048" ~ "HPAP048",
+      folder_id == "068" ~ "HPAP068",
+      folder_id == "078" ~ "HPAP078",
+      TRUE ~ folder_id
+    ),
+    ImageID = str_extract(source_file, "\\d+")
+  )
+
+cat("Ki-67 raw rows:", nrow(ki67_raw), "\n")
+```
+
+## D2. Dedupe phenotyper data to physical islets
+
+```{r d2_dedupe_physical_islets}
+# Each physical islet appears once per algorithm run (Single/Double/Quad) in
+# the phenotyper data. For spatial matching we need one canonical row per
+# physical islet, keyed by bounding-box coordinates.
+phenotyper_islets <- phenotyper_raw %>%
+  distinct(ImageID, XMin, XMax, YMin, YMax, .keep_all = TRUE)
+
+cat("Phenotyper rows (all algorithms):", nrow(phenotyper_raw), "\n")
+cat("Phenotyper distinct physical islets:", nrow(phenotyper_islets), "\n")
+```
+
+## D3. Spatially match ki67 islets to phenotyper islets
+
+```{r d3_spatial_match}
+# Greedy nearest-centroid matcher: for each image, pairs islets across the two
+# datasets by bounding-box centroid distance, enforcing 1-to-1 pairings.
+match_islets_one_image <- function(df1, df2, max_dist = 20) {
+  df1 <- df1 %>% mutate(cx = (XMin + XMax)/2, cy = (YMin + YMax)/2, .i = row_number())
+  df2 <- df2 %>% mutate(cx = (XMin + XMax)/2, cy = (YMin + YMax)/2, .j = row_number())
+
+  pairs <- expand.grid(.i = df1$.i, .j = df2$.j) %>%
+    mutate(dist = sqrt((df1$cx[.i] - df2$cx[.j])^2 +
+                       (df1$cy[.i] - df2$cy[.j])^2)) %>%
+    filter(dist <= max_dist) %>%
+    arrange(dist)
+
+  used1 <- logical(nrow(df1))
+  used2 <- logical(nrow(df2))
+  keep  <- logical(nrow(pairs))
+  for (k in seq_len(nrow(pairs))) {
+    if (!used1[pairs$.i[k]] && !used2[pairs$.j[k]]) {
+      keep[k] <- TRUE
+      used1[pairs$.i[k]] <- TRUE
+      used2[pairs$.j[k]] <- TRUE
+    }
+  }
+  pairs <- pairs[keep, ]
+
+  tibble(
+    ki67_Object.Id  = df1$Object.Id[pairs$.i],
+    count_Object.Id = df2$Object.Id[pairs$.j],
+    dist_px         = pairs$dist
+  )
+}
+
+# Apply per image
+all_matches <- phenotyper_islets %>%
+  distinct(ImageID) %>%
+  pull(ImageID) %>%
+  map_dfr(function(img) {
+    d1 <- ki67_raw          %>% filter(ImageID == img)
+    d2 <- phenotyper_islets %>% filter(ImageID == img)
+    if (nrow(d1) == 0 || nrow(d2) == 0) return(NULL)
+    match_islets_one_image(d1, d2, max_dist = 20) %>%
+      mutate(ImageID = img, .before = 1)
+  })
+
+cat("Raw matches:", nrow(all_matches), "\n")
+```
+
+## D4. Filter matches by distance and bounding-box size ratio
+
+```{r d4_filter_matches}
+# True matches should be both spatially close AND similar in size.
+# Attach bounding-box areas from each dataset, compute size ratio, filter.
+all_matches_clean <- all_matches %>%
+  left_join(
+    ki67_raw %>%
+      mutate(area1 = (XMax - XMin) * (YMax - YMin)) %>%
+      dplyr::select(ImageID, Object.Id, area1,
+                    ki67_XMin = XMin, ki67_XMax = XMax,
+                    ki67_YMin = YMin, ki67_YMax = YMax),
+    by = c("ImageID", "ki67_Object.Id" = "Object.Id")
+  ) %>%
+  left_join(
+    phenotyper_islets %>%
+      mutate(area2 = (XMax - XMin) * (YMax - YMin)) %>%
+      dplyr::select(ImageID, Object.Id, area2,
+                    ph_XMin = XMin, ph_XMax = XMax,
+                    ph_YMin = YMin, ph_YMax = YMax),
+    by = c("ImageID", "count_Object.Id" = "Object.Id")
+  ) %>%
+  mutate(area_ratio = pmin(area1, area2) / pmax(area1, area2)) %>%
+  filter(dist_px <= 15, area_ratio >= 0.5)
+
+cat("Matched islets after filtering:", nrow(all_matches_clean),
+    sprintf("(%.1f%% of ki67 islets)\n",
+            100 * nrow(all_matches_clean) / nrow(ki67_raw)))
+```
+
+## D5. Build ki67_data and join demographics
+
+```{r d5_build_ki67_data}
+# Pull all Ki-67 columns from raw ki67 data (regex handles the "Ki.67" dot).
+ki67_cols <- ki67_raw %>%
+  dplyr::select(
+    ImageID, XMin, XMax, YMin, YMax,
+    matches("Ki\\.?_?67", ignore.case = TRUE)
+  )
+
+# Join ki67 values onto the FULL phenotyper_raw (not the deduped version)
+# using phenotyper coordinates, so every algorithm row for a matched islet
+# receives the same ki67 values.
+match_link <- all_matches_clean %>%
+  dplyr::select(
+    ImageID,
+    XMin = ph_XMin, XMax = ph_XMax, YMin = ph_YMin, YMax = ph_YMax,
+    ki67_XMin, ki67_XMax, ki67_YMin, ki67_YMax,
+    dist_px
+  )
+
+ki67_joined <- phenotyper_raw %>%
+  inner_join(match_link,
+             by = c("ImageID", "XMin", "XMax", "YMin", "YMax"),
+             relationship = "many-to-one") %>%
+  left_join(ki67_cols,
+            by = c("ImageID",
+                   "ki67_XMin" = "XMin", "ki67_XMax" = "XMax",
+                   "ki67_YMin" = "YMin", "ki67_YMax" = "YMax"),
+            relationship = "many-to-one")
+
+# Select desired columns and apply basic filters
+ki67_data <- ki67_joined %>%
+  clean_names(replace = c("\u03bc" = "u")) %>%
+  dplyr::select(
+    folder_id,
+    ImageID = image_id,
+    object_id,
+    total_cells,
+    ki_67_phenotyper_insulin_cells,
+    x_ki_67_phenotyper_insulin_positive_cells,
+    ki_67_phenotyper_glucagon_cells,
+    x_ki_67_phenotyper_glucagon_positive_cells,
+    ki_67_phenotyper_acinar_cells,
+    x_ki_67_phenotyper_acinar_positive_cells,
+    tissue_area_um_2,
+    dist_px
+  ) %>%
+  filter(total_cells > 0)
+
+# Join demographics from no_cutoff_data (already has all donor-level fixes applied)
+ki67_data <- ki67_data %>%
+  mutate(folder_id = as.character(folder_id),
+         ImageID   = as.character(ImageID),
+         object_id = as.integer(object_id)) %>%
+  left_join(
+    no_cutoff_data %>%
+      mutate(Donor     = as.character(Donor),
+             ImageID   = as.character(ImageID),
+             Object.Id = as.integer(Object.Id),
+             Region    = as.character(Region),
+             log_islet_cells = as.numeric(log_Islet.Cells)) %>%
+      dplyr::select(Donor, ImageID, Object.Id, Region,
+                    Sex, Age, AgeCat, Diagnosis,
+                    Disease.Duration, age_at_onset,
+                    Count.ins, Count.glu, log_Islet.Cells) %>%
+      distinct(),
+    by = c("folder_id" = "Donor", "ImageID", "object_id" = "Object.Id")
+  ) %>%
+  filter(!is.na(Diagnosis)) %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1]
+  )
+
+# Derive proliferation rates using the phenotyper's hormone-cell counts as denominators
+ki67_data <- ki67_data %>%
+  mutate(
+    # Reconstruct absolute counts of Ki-67+ hormone cells from the percent columns
+    ki67pos_glu = round(x_ki_67_phenotyper_glucagon_positive_cells *
+                        ki_67_phenotyper_glucagon_cells / 100),
+    ki67pos_ins = round(x_ki_67_phenotyper_insulin_positive_cells *
+                        ki_67_phenotyper_insulin_cells / 100),
+    
+    # Proliferation rate using the more reliable phenotyper Count.glu / Count.ins
+    # as the hormone-cell denominator
+    glu_prolif_rate = if_else(Count.glu > 0, ki67pos_glu / Count.glu, NA_real_),
+    ins_prolif_rate = if_else(Count.ins > 0, ki67pos_ins / Count.ins, NA_real_),
+    
+    # Flag biologically-impossible values (cross-algorithm disagreement on small islets)
+    glu_prolif_impossible = !is.na(glu_prolif_rate) & glu_prolif_rate > 1,
+    ins_prolif_impossible = !is.na(ins_prolif_rate) & ins_prolif_rate > 1,
+    
+    # NA out the impossible values so they don't contaminate downstream stats
+    glu_prolif_rate = if_else(glu_prolif_impossible, NA_real_, glu_prolif_rate),
+    ins_prolif_rate = if_else(ins_prolif_impossible, NA_real_, ins_prolif_rate)
+  ) %>%
+  rename(Donor = folder_id)
+
+rm(ki67_joined, ki67_cols, match_link, all_matches, all_matches_clean); gc()
+```
+
+## D6. Sanity checks
+
+```{r d6_ki67_sanity}
+cat("=== Ki-67 dataset sanity checks ===\n\n")
+
+cat("Distance distribution (should be tight near 0, max near 15):\n")
+print(summary(ki67_data$dist_px))
+
+cat("\nMissing demographics (should be 0):\n")
+print(ki67_data %>%
+  summarise(
+    missing_sex       = sum(is.na(Sex)),
+    missing_age       = sum(is.na(Age)),
+    missing_diagnosis = sum(is.na(Diagnosis))
+  ))
+
+cat("\nAlgorithm disagreements (ki67+ insulin cells > total cells):\n")
+cat("  count:", sum(ki67_data$ki67_gt_total, na.rm = TRUE),
+    sprintf("(%.3f%% of rows)\n",
+            100 * mean(ki67_data$ki67_gt_total, na.rm = TRUE)))
+```
+
+## D7. Save Ki-67 datasets
+
+```{r d7_save_ki67}
+write_csv(ki67_data, "Data/ki67_data.csv")
+saveRDS(ki67_data, "Data/ki67_data.rds")
+cat("Saved: ki67_data.csv —", nrow(ki67_data), "rows,",
+    length(unique(ki67_data$Donor)), "donors,",
+    length(unique(ki67_data$ImageID)), "images\n")
+
+ki67_data_t1d <- ki67_data %>% filter(Diagnosis == "T1D") %>%
+  mutate(
+    Age_c              = scale(Age, center = TRUE, scale = FALSE)[, 1],
+    log_Islet.Cells_c  = scale(log_Islet.Cells, center = TRUE, scale = FALSE)[, 1],
+    Disease.Duration_c  = scale(Disease.Duration, center = TRUE, scale = FALSE)[, 1]
+  ) %>%
+  mutate(
+    age_at_onset   = Age - Disease.Duration,
+    age_at_onset_c = scale(age_at_onset, center = TRUE, scale = FALSE)[, 1]
+  )
+
+write_csv(ki67_data_t1d, "Data/ki67_data_t1d.csv")
+saveRDS(ki67_data_t1d, "Data/ki67_data_t1d.rds")
+cat("Saved: ki67_data_t1d.csv —", nrow(ki67_data_t1d), "rows,",
+    length(unique(ki67_data_t1d$Donor)), "donors\n")
+```
+---
+
+# Summary
+
+```{r summary}
+cat("=== Pipeline Complete ===\n\n")
+
+datasets <- list(
+  "no_cutoff_data.csv"   = no_cutoff_data,
+  "no_cutoff_data_t1d.csv"   = no_cutoff_data_t1d,
+  "full_data.csv"        = full_data,
+  "full_data_t1d.csv"        = full_data_t1d,
+  "quad_data.csv"        = quad_data,
+  "quad_data_t1d.csv"        = quad_data_t1d,
+  "area_data_joined.csv" = area_data_joined,
+  "area_data_joined_t1d.csv" = area_data_joined_t1d,
+  "density_data.csv"     = density_dataset,
+  "density_data_t1d.csv"     = density_dataset_t1d,
+  "ki67_data.csv"           = ki67_data,
+  "ki67_data_t1d.csv"       = ki67_data_t1d
+)
+
+for (nm in names(datasets)) {
+  d <- datasets[[nm]]
+  cat(sprintf("%-25s  %7d rows  %3d donors  %4d images\n",
+              nm, nrow(d),
+              length(unique(d$Donor)),
+              length(unique(d$ImageID))))
+}
+```
+
+```{r}
+sessionInfo()
+```
+

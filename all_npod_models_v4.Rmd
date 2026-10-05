@@ -1,0 +1,936 @@
+---
+title: "All nPOD Models"
+output: html_document
+date: "2026-03-28"
+---
+
+Family choices informed by `model_diagnostics.Rmd` and `count_nb_comparison.Rmd`:
+
+- **Density**: Gamma(log) — dispersion 1.03, no issues
+- **Count.ins**: NB1 — AIC winner by 80K over NB2; DHARMa underdispersion (0.014)
+  is conservative (SEs too wide), not a misspecification
+- **Count.glu**: ZINB1 (zi ~ Diagnosis) — significant ZI, ΔAIC = -5170 vs NB1
+- **Count.soma**: NB1 — dispersion 0.88, fine
+- **Count.PP**: NB1 — dispersion 1.05, fine
+- **Islet.Cells**: NB2 — AIC winner; mild overdispersion (1.36); ZINB worse by +4 AIC
+- **All total area**: Gaussian on log(area) — LogNorm dispersion 0.84-1.01 everywhere;
+  Gamma catastrophically underdispersed for ins (0.005-0.11) and overdispersed
+  for pp (2.8-29); raw Gaussian sometimes fails to converge
+- **All per-cell area**: Gaussian on log(area/count) — AIC winner by 250K–5M over
+  Gamma and lognormal in all 12 cell × subset combinations. Insulin multi-cell/islet
+  subsets show conservative underdispersion (0.45–0.55), same pattern as insulin
+  count models. Informed by `per_cell_area_diagnostics.Rmd`.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(glmmTMB)
+library(splines)
+
+for (d in c("Density/Models", "Count/Models", "Area/Models/Total_Area/", "Area/Models/Per_Cell_Area/")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+```{r data-loading}
+# ==========================================================================
+# Load ALL pre-built datasets from Create_unified_dataset.Rmd
+# Each dataset already has correct centering for its subset
+# ==========================================================================
+
+# --- Core datasets ---
+quad_data        <- readRDS("Data/quad_data.rds")
+quad_t1d         <- readRDS("Data/quad_data_t1d.rds")
+cutoff_data      <- readRDS("Data/cutoff_data.rds")
+density_dataset  <- readRDS("Data/density_data.rds")
+density_t1d      <- readRDS("Data/density_data_t1d.rds")
+
+# --- Ratio datasets (already filtered: no Single stain, no Donor 6473, no zero denom) ---
+ratio_data       <- readRDS("Data/ratio_data.rds")
+ratio_data_t1d   <- readRDS("Data/ratio_data_t1d.rds")
+
+# --- Area datasets by size category ---
+area_data_joined <- readRDS("Data/area_data.rds")
+area_t1d         <- readRDS("Data/area_data_t1d.rds")
+
+area_singlets      <- readRDS("Data/area_data_singlets.rds")
+area_singlets_t1d  <- readRDS("Data/area_data_singlets_t1d.rds")
+area_endobs        <- readRDS("Data/area_data_endobs.rds")
+area_endobs_t1d    <- readRDS("Data/area_data_endobs_t1d.rds")
+area_islets        <- readRDS("Data/area_data_islets.rds")
+area_islets_t1d    <- readRDS("Data/area_data_islets_t1d.rds")
+
+# --- Area combined datasets (logIC zeroed for singletons, per cell type) ---
+beta_combined      <- readRDS("Data/area_data_beta_combined.rds")
+beta_combined_t1d  <- readRDS("Data/area_data_beta_combined_t1d.rds")
+alpha_combined     <- readRDS("Data/area_data_alpha_combined.rds")
+alpha_combined_t1d <- readRDS("Data/area_data_alpha_combined_t1d.rds")
+delta_combined     <- readRDS("Data/area_data_delta_combined.rds")
+delta_combined_t1d <- readRDS("Data/area_data_delta_combined_t1d.rds")
+pp_combined        <- readRDS("Data/area_data_pp_combined.rds")
+pp_combined_t1d    <- readRDS("Data/area_data_pp_combined_t1d.rds")
+```
+
+```{r data-prep}
+# ==========================================================================
+# Factor levels and object_type — centering already done in data creation
+# ==========================================================================
+
+set_factors <- function(df) {
+  df %>% mutate(
+    Diagnosis = factor(Diagnosis, levels = c("ND", "T1D")),
+    Region    = factor(Region, levels = c("Head", "Body", "Tail")),
+    Sex       = factor(Sex, levels = c("Female", "Male")),
+    Donor     = factor(Donor),
+    ImageID   = factor(ImageID))
+}
+set_factors_no_image <- function(df) {
+  df %>% mutate(
+    Diagnosis = factor(Diagnosis, levels = c("ND", "T1D")),
+    Region    = factor(Region, levels = c("Head", "Body", "Tail")),
+    Sex       = factor(Sex, levels = c("Female", "Male")),
+    Donor     = factor(Donor))
+}
+
+quad_data <- set_factors(quad_data)
+quad_t1d  <- set_factors(quad_t1d) %>% droplevels()
+cutoff_data <- set_factors(cutoff_data)
+ratio_data <- set_factors(ratio_data)
+ratio_data_t1d <- set_factors(ratio_data_t1d) %>% droplevels()
+density_dataset <- set_factors_no_image(density_dataset)
+density_t1d <- set_factors_no_image(density_t1d) %>% droplevels()
+
+area_data_joined <- set_factors(area_data_joined)
+area_t1d <- set_factors(area_t1d) %>% droplevels()
+area_singlets <- set_factors(area_singlets)
+area_singlets_t1d <- set_factors(area_singlets_t1d) %>% droplevels()
+area_endobs <- set_factors(area_endobs)
+area_endobs_t1d <- set_factors(area_endobs_t1d) %>% droplevels()
+area_islets <- set_factors(area_islets)
+area_islets_t1d <- set_factors(area_islets_t1d) %>% droplevels()
+beta_combined <- set_factors(beta_combined)
+beta_combined_t1d <- set_factors(beta_combined_t1d) %>% droplevels()
+alpha_combined <- set_factors(alpha_combined)
+alpha_combined_t1d <- set_factors(alpha_combined_t1d) %>% droplevels()
+delta_combined <- set_factors(delta_combined)
+delta_combined_t1d <- set_factors(delta_combined_t1d) %>% droplevels()
+pp_combined <- set_factors(pp_combined)
+pp_combined_t1d <- set_factors(pp_combined_t1d) %>% droplevels()
+
+add_object_type <- function(df) {
+  df %>% mutate(
+    object_type = factor(case_when(
+      Islet.Cells == 1 ~ "1 cell",
+      Islet.Cells >= 2 & Islet.Cells <= 14 ~ "2-14 Cells",
+      Islet.Cells >= 15 ~ "15+ Cells"),
+      levels = c("1 cell", "2-14 Cells", "15+ Cells")))
+}
+area_data_joined   <- add_object_type(area_data_joined)
+area_t1d           <- add_object_type(area_t1d)
+beta_combined      <- add_object_type(beta_combined)
+beta_combined_t1d  <- add_object_type(beta_combined_t1d)
+alpha_combined     <- add_object_type(alpha_combined)
+alpha_combined_t1d <- add_object_type(alpha_combined_t1d)
+delta_combined     <- add_object_type(delta_combined)
+delta_combined_t1d <- add_object_type(delta_combined_t1d)
+pp_combined        <- add_object_type(pp_combined)
+pp_combined_t1d    <- add_object_type(pp_combined_t1d)
+
+# --- Centering verification ---
+cat("=== Centering verification (all should be ~0) ===\n")
+check_centering <- function(nm, df) {
+  cat(sprintf("%-22s  Age_c=%+.4f  logIC_c=%+.4f  DD_c=%+.4f  onset_c=%+.4f\n",
+    nm, mean(df$Age_c, na.rm=TRUE),
+    if("log_Islet.Cells_c" %in% names(df)) mean(df$log_Islet.Cells_c, na.rm=TRUE) else NA,
+    mean(df$Disease.Duration_c, na.rm=TRUE), mean(df$age_at_onset_c, na.rm=TRUE)))
+}
+for (nm in c("quad_data","quad_t1d","ratio_data","ratio_data_t1d","density_dataset","density_t1d",
+             "area_singlets","area_singlets_t1d","area_endobs","area_endobs_t1d",
+             "area_islets","area_islets_t1d","beta_combined","beta_combined_t1d")) {
+  check_centering(nm, get(nm))
+}
+```
+
+# Density
+
+## Diagnosis
+
+```{r density-diag}
+density_diag <- glmmTMB(islet_density ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                          Diagnosis:Region:Age_c + (1|Donor), 
+                        data = density_dataset, 
+                        family = Gamma(link = "log"))
+saveRDS(density_diag, "Density/Models/density_diag.rds"); rm(density_diag); gc()
+```
+
+## Age at Onset
+
+```{r density-ao}
+density_mod_t1d <- glmmTMB(islet_density ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 + 
+                           Disease.Duration_c:Region:age_at_onset_c + (1|Donor), 
+                         data = density_t1d, 
+                         family = Gamma(link = "log"))
+saveRDS(density_mod_t1d, "Density/Models/density_t1d.rds"); rm(density_mod_t1d); gc()
+```
+
+## Plotting Helper
+
+```{r density-plot-helpers}
+density_spline <- glmmTMB(islet_density ~ ns(Disease.Duration_c, df = 3) + Age_c + Sex + Region + 
+                          (1|Donor), 
+                          family = Gamma(link = "log"), 
+                          data = density_t1d)
+saveRDS(density_spline, "Density/Models/density_spline.rds"); rm(density_spline); gc()
+```
+
+# Proportion & Ratio Models
+
+Run on HTC cluster:
+
+- `proportion_diagnosis_HTC.R` (12 ordbetareg: 4 cell types × powered/mid/full)
+- `proportion_t1d_HTC.R` (8 ordbetareg: 4 cell types × DD/AO)
+- `ratio_diagnosis_HTC.R` (3 ordbetareg: powered/mid/full)
+- `ratio_t1d_HTC.R` (2 ordbetareg: DD/AO)
+
+# Count Models
+
+## Diagnosis
+
+```{r count-diag}
+# Count.ins — NB1 (AIC winner by 80K; underdispersion = conservative SEs)
+count_ins <- glmmTMB(Count.ins ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+                       Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+                       (1|Donor) + (1|Donor:ImageID), 
+                     data = quad_data, 
+                     family = nbinom1)
+saveRDS(count_ins, "Count/Models/count_ins.rds"); rm(count_ins); gc()
+
+# Count.glu — ZINB1, zi ~ Diagnosis (ΔAIC = -5170 vs NB1)
+count_glu <- glmmTMB(Count.glu ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+                       Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+                       (1|Donor) + (1|Donor:ImageID), 
+                     data = quad_data, 
+                     family = nbinom1, 
+                     ziformula = ~ Diagnosis)
+saveRDS(count_glu, "Count/Models/count_glu.rds"); rm(count_glu); gc()
+
+# Count.soma — NB1 (disp = 0.88)
+count_soma <- glmmTMB(Count.soma ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+                        Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+                        (1|Donor) + (1|Donor:ImageID), 
+                      data = quad_data, 
+                      family = nbinom1)
+saveRDS(count_soma, "Count/Models/count_soma.rds"); rm(count_soma); gc()
+
+# Count.PP — NB1 (disp = 1.05)
+count_pp <- glmmTMB(Count.PP ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+                      Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+                      (1|Donor) + (1|Donor:ImageID), 
+                    data = quad_data, 
+                    family = nbinom1)
+saveRDS(count_pp, "Count/Models/count_pp.rds"); rm(count_pp); gc()
+
+# Islet.Cells — NB2 (AIC winner; disp = 1.36; ZINB worse by +4)
+count_islet <- glmmTMB(Islet.Cells ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                         Diagnosis:Region:Age_c + (1|Donor) + (1|Donor:ImageID),
+                       data = quad_data, 
+                       family = nbinom2)
+saveRDS(count_islet, "Count/Models/count_islet.rds"); rm(count_islet); gc()
+```
+
+## T1D
+
+```{r count-t1d}
+count_ins_t1d <- glmmTMB(Count.ins ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+                             Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+                             (1|Donor) + (1|Donor:ImageID), 
+                           data = quad_t1d, 
+                           family = nbinom1)
+saveRDS(count_ins_t1d, "Count/Models/count_ins_t1d.rds"); rm(count_ins_t1d); gc()
+
+count_glu_t1d <- glmmTMB(Count.glu ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+                             Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+                             (1|Donor) + (1|Donor:ImageID), 
+                           data = quad_t1d, 
+                           family = nbinom1, 
+                           ziformula = ~ 1)
+saveRDS(count_glu_t1d, "Count/Models/count_glu_t1d.rds"); rm(count_glu_t1d); gc()
+
+count_soma_t1d <- glmmTMB(Count.soma ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+                              Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+                              (1|Donor) + (1|Donor:ImageID), 
+                            data = quad_t1d, 
+                            family = nbinom1)
+saveRDS(count_soma_t1d, "Count/Models/count_soma_t1d.rds"); rm(count_soma_t1d); gc()
+
+count_pp_t1d <- glmmTMB(Count.PP ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+                            Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+                            (1|Donor) + (1|Donor:ImageID), 
+                          data = quad_t1d, 
+                          family = nbinom1)
+saveRDS(count_pp_t1d, "Count/Models/count_pp_t1d.rds"); rm(count_pp_t1d); gc()
+
+count_islet_t1d <- glmmTMB(Islet.Cells ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                               Disease.Duration_c:Region:age_at_onset_c + (1|Donor) + (1|Donor:ImageID),
+                             data = quad_t1d, 
+                             family = nbinom2)
+saveRDS(count_islet_t1d, "Count/Models/count_islet_t1d.rds"); rm(count_islet_t1d); gc()
+```
+
+# Total Area Models — All Gaussian on log(area)
+
+```{r area-helpers}
+# In all_npod_models_c.Rmd area-helpers chunk
+area_to_count <- c(ins_area = "Count.ins", glu_area = "Count.glu",
+                   soma_area = "Count.soma", pp_area = "Count.PP")
+
+split_area <- function(data, cell_col) {
+  log_col   <- paste0("log_", cell_col)
+  count_col <- area_to_count[[cell_col]]
+  data %>%
+    filter(!is.na(!!sym(cell_col)) & !!sym(cell_col) > 0 &
+           !!sym(count_col) > 0) %>%
+    mutate(!!log_col := log(!!sym(cell_col)))
+}
+
+# --- Diagnosis formulas ---
+area_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+    Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+area_reduced_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c)^2 +
+    Diagnosis:Region:Age_c + (1|Donor) + (1|Donor:ImageID)"))
+}
+area_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c)^2 +
+    Diagnosis:Region:Age_c + log_Islet.Cells_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+# --- T1D formulas ---
+area_t1d_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+    Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+area_t1d_reduced_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+    Disease.Duration_c:Region:age_at_onset_c + (1|Donor) + (1|Donor:ImageID)"))
+}
+area_t1d_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+    Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+# --- Per-cell area helper ---
+# Divides total cell-type area by cell-type count, then log-transforms
+split_per_cell <- function(data, cell_col) {
+  count_col <- area_to_count[[cell_col]]
+  log_col   <- paste0("log_", cell_col, "_pc")
+  data %>%
+    filter(!is.na(!!sym(cell_col)) & !!sym(cell_col) > 0 &
+           !!sym(count_col) > 0) %>%
+    mutate(!!log_col := log(!!sym(cell_col) / !!sym(count_col)))
+}
+
+# Per-cell area formulas (identical structure to total area formulas)
+pc_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c + log_Islet.Cells_c)^2 +
+    Diagnosis:Region:log_Islet.Cells_c + Diagnosis:Region:Age_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+pc_reduced_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c)^2 +
+    Diagnosis:Region:Age_c + (1|Donor) + (1|Donor:ImageID)"))
+}
+pc_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c)^2 +
+    Diagnosis:Region:Age_c + log_Islet.Cells_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+pc_t1d_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_Islet.Cells_c)^2 +
+    Disease.Duration_c:Region:log_Islet.Cells_c + Disease.Duration_c:Region:age_at_onset_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+pc_t1d_reduced_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+    Disease.Duration_c:Region:age_at_onset_c + (1|Donor) + (1|Donor:ImageID)"))
+}
+pc_t1d_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+    Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+```
+
+## Diagnosis — Singlets (Total Area)
+
+```{r area-diag-singlets}
+beta_1cell_data  <- split_area(area_singlets, "ins_area")
+alpha_1cell_data <- split_area(area_singlets, "glu_area")
+delta_1cell_data <- split_area(area_singlets, "soma_area")
+pp_1cell_data    <- split_area(area_singlets, "pp_area")
+
+area_beta_1cell <- glmmTMB(area_reduced_formula("log_ins_area"), 
+                           data = beta_1cell_data, 
+                           family = gaussian())
+saveRDS(area_beta_1cell, "Area/Models/Total_Area/area_beta_1cell.rds"); rm(area_beta_1cell); gc()
+
+area_alpha_1cell <- glmmTMB(area_reduced_formula("log_glu_area"), 
+                            data = alpha_1cell_data, 
+                            family = gaussian())
+saveRDS(area_alpha_1cell, "Area/Models/Total_Area/area_alpha_1cell.rds"); rm(area_alpha_1cell); gc()
+
+area_delta_1cell <- glmmTMB(area_reduced_formula("log_soma_area"), 
+                            data = delta_1cell_data, 
+                            family = gaussian())
+saveRDS(area_delta_1cell, "Area/Models/Total_Area/area_delta_1cell.rds"); rm(area_delta_1cell); gc()
+
+area_pp_1cell <- glmmTMB(area_reduced_formula("log_pp_area"), 
+                         data = pp_1cell_data, 
+                         family = gaussian())
+saveRDS(area_pp_1cell, "Area/Models/Total_Area/area_pp_1cell.rds"); rm(area_pp_1cell); gc()
+```
+
+## Diagnosis — Small EOs (Total Area)
+
+```{r area-diag-smallEO}
+beta_2to14_data  <- split_area(area_endobs, "ins_area")
+alpha_2to14_data <- split_area(area_endobs, "glu_area")
+delta_2to14_data <- split_area(area_endobs, "soma_area")
+pp_2to14_data    <- split_area(area_endobs, "pp_area")
+
+area_beta_2to14 <- glmmTMB(area_seo_formula("log_ins_area"), 
+                           data = beta_2to14_data, 
+                           family = gaussian())
+saveRDS(area_beta_2to14, "Area/Models/Total_Area/area_beta_2to14.rds"); rm(area_beta_2to14); gc()
+
+area_alpha_2to14 <- glmmTMB(area_seo_formula("log_glu_area"), 
+                            data = alpha_2to14_data, 
+                            family = gaussian())
+saveRDS(area_alpha_2to14, "Area/Models/Total_Area/area_alpha_2to14.rds"); rm(area_alpha_2to14); gc()
+
+area_delta_2to14 <- glmmTMB(area_seo_formula("log_soma_area"), 
+                            data = delta_2to14_data, 
+                            family = gaussian())
+saveRDS(area_delta_2to14, "Area/Models/Total_Area/area_delta_2to14.rds"); rm(area_delta_2to14); gc()
+
+area_pp_2to14 <- glmmTMB(area_seo_formula("log_pp_area"), 
+                         data = pp_2to14_data, 
+                         family = gaussian())
+saveRDS(area_pp_2to14, "Area/Models/Total_Area/area_pp_2to14.rds"); rm(area_pp_2to14); gc()
+```
+
+## Diagnosis — Islets (Total Area)
+
+```{r area-diag-islets}
+beta_15plus_data  <- split_area(area_islets, "ins_area")
+alpha_15plus_data <- split_area(area_islets, "glu_area")
+delta_15plus_data <- split_area(area_islets, "soma_area")
+pp_15plus_data    <- split_area(area_islets, "pp_area")
+
+area_beta_15plus <- glmmTMB(area_full_formula("log_ins_area"), 
+                            data = beta_15plus_data, 
+                            family = gaussian())
+saveRDS(area_beta_15plus, "Area/Models/Total_Area/area_beta_15plus.rds"); rm(area_beta_15plus); gc()
+
+area_alpha_15plus <- glmmTMB(area_full_formula("log_glu_area"), 
+                             data = alpha_15plus_data, 
+                             family = gaussian())
+saveRDS(area_alpha_15plus, "Area/Models/Total_Area/area_alpha_15plus.rds"); rm(area_alpha_15plus); gc()
+
+area_delta_15plus <- glmmTMB(area_full_formula("log_soma_area"), 
+                             data = delta_15plus_data, 
+                             family = gaussian())
+saveRDS(area_delta_15plus, "Area/Models/Total_Area/area_delta_15plus.rds"); rm(area_delta_15plus); gc()
+
+area_pp_15plus <- glmmTMB(area_full_formula("log_pp_area"), 
+                          data = pp_15plus_data, 
+                          family = gaussian())
+saveRDS(area_pp_15plus, "Area/Models/Total_Area/area_pp_15plus.rds"); rm(area_pp_15plus); gc()
+```
+
+## Diagnosis — Combined (Total Area)
+
+```{r area-diag-combined}
+beta_combined_model <- glmmTMB(log_ins_area ~ (Diagnosis + Region + Sex + Age_c)^2 + 
+                                 Diagnosis:Region:Age_c + log_Islet.Cells_c + 
+                                 object_type * Diagnosis + object_type * Region +
+                                 (1|Donor) + (1|Donor:ImageID),
+                               data = beta_combined, 
+                               family = gaussian())
+saveRDS(beta_combined_model, "Area/Models/Total_Area/beta_combined_model.rds"); rm(beta_combined_model); gc()
+
+alpha_combined_model <- glmmTMB(log_glu_area ~ (Diagnosis + Region + Sex + Age_c)^2 + 
+                                  Diagnosis:Region:Age_c + log_Islet.Cells_c + 
+                                  object_type * Diagnosis + object_type * Region +
+                                  (1|Donor) + (1|Donor:ImageID),
+                                data = alpha_combined, 
+                                family = gaussian())
+saveRDS(alpha_combined_model, "Area/Models/Total_Area/alpha_combined_model.rds"); rm(alpha_combined_model); gc()
+
+delta_combined_model <- glmmTMB(log_soma_area ~ (Diagnosis + Region + Sex + Age_c)^2 + 
+                                  Diagnosis:Region:Age_c + log_Islet.Cells_c + 
+                                  object_type * Diagnosis + object_type * Region +
+                                  (1|Donor) + (1|Donor:ImageID),
+                                data = delta_combined, 
+                                family = gaussian())
+saveRDS(delta_combined_model, "Area/Models/Total_Area/delta_combined_model.rds"); rm(delta_combined_model); gc()
+
+pp_combined_model <- glmmTMB(log_pp_area ~ (Diagnosis + Region + Sex + Age_c)^2 + 
+                               Diagnosis:Region:Age_c + log_Islet.Cells_c + 
+                               object_type * Diagnosis + object_type * Region +
+                               (1|Donor) + (1|Donor:ImageID),
+                             data = pp_combined, 
+                             family = gaussian())
+saveRDS(pp_combined_model, "Area/Models/Total_Area/pp_combined_model.rds"); rm(pp_combined_model); gc()
+```
+
+## T1D — Singlets (Total Area)
+
+```{r area-t1d-singlets}
+beta_1cell_data_t1d  <- split_area(area_singlets_t1d, "ins_area")
+alpha_1cell_data_t1d <- split_area(area_singlets_t1d, "glu_area")
+delta_1cell_data_t1d <- split_area(area_singlets_t1d, "soma_area")
+pp_1cell_data_t1d    <- split_area(area_singlets_t1d, "pp_area")
+
+area_beta_1cell_t1d <- glmmTMB(area_t1d_reduced_formula("log_ins_area"), 
+                                 data = beta_1cell_data_t1d, 
+                                 family = gaussian())
+saveRDS(area_beta_1cell_t1d, "Area/Models/Total_Area/area_beta_1cell_t1d.rds"); rm(area_beta_1cell_t1d); gc()
+
+area_alpha_1cell_t1d <- glmmTMB(area_t1d_reduced_formula("log_glu_area"), 
+                                  data = alpha_1cell_data_t1d, 
+                                  family = gaussian())
+saveRDS(area_alpha_1cell_t1d, "Area/Models/Total_Area/area_alpha_1cell_t1d.rds"); rm(area_alpha_1cell_t1d); gc()
+
+area_delta_1cell_t1d <- glmmTMB(area_t1d_reduced_formula("log_soma_area"), 
+                                  data = delta_1cell_data_t1d, 
+                                  family = gaussian())
+saveRDS(area_delta_1cell_t1d, "Area/Models/Total_Area/area_delta_1cell_t1d.rds"); rm(area_delta_1cell_t1d); gc()
+
+area_pp_1cell_t1d <- glmmTMB(area_t1d_reduced_formula("log_pp_area"), 
+                               data = pp_1cell_data_t1d, 
+                               family = gaussian())
+saveRDS(area_pp_1cell_t1d, "Area/Models/Total_Area/area_pp_1cell_t1d.rds"); rm(area_pp_1cell_t1d); gc()
+```
+
+## T1D — Small EOs (Total Area)
+
+```{r area-t1d-smallEO}
+beta_2to14_data_t1d  <- split_area(area_endobs_t1d, "ins_area")
+alpha_2to14_data_t1d <- split_area(area_endobs_t1d, "glu_area")
+delta_2to14_data_t1d <- split_area(area_endobs_t1d, "soma_area")
+pp_2to14_data_t1d    <- split_area(area_endobs_t1d, "pp_area")
+
+area_beta_2to14_t1d <- glmmTMB(area_t1d_seo_formula("log_ins_area"), 
+                                 data = beta_2to14_data_t1d, 
+                                 family = gaussian())
+saveRDS(area_beta_2to14_t1d, "Area/Models/Total_Area/area_beta_2to14_t1d.rds"); rm(area_beta_2to14_t1d); gc()
+
+area_alpha_2to14_t1d <- glmmTMB(area_t1d_seo_formula("log_glu_area"), 
+                                  data = alpha_2to14_data_t1d, 
+                                  family = gaussian())
+saveRDS(area_alpha_2to14_t1d, "Area/Models/Total_Area/area_alpha_2to14_t1d.rds"); rm(area_alpha_2to14_t1d); gc()
+
+area_delta_2to14_t1d <- glmmTMB(area_t1d_seo_formula("log_soma_area"), 
+                                  data = delta_2to14_data_t1d, 
+                                  family = gaussian())
+saveRDS(area_delta_2to14_t1d, "Area/Models/Total_Area/area_delta_2to14_t1d.rds"); rm(area_delta_2to14_t1d); gc()
+
+area_pp_2to14_t1d <- glmmTMB(area_t1d_seo_formula("log_pp_area"), 
+                               data = pp_2to14_data_t1d, 
+                               family = gaussian())
+saveRDS(area_pp_2to14_t1d, "Area/Models/Total_Area/area_pp_2to14_t1d.rds"); rm(area_pp_2to14_t1d); gc()
+```
+
+## T1D — Islets (Total Area)
+
+```{r area-t1d-islets}
+beta_15plus_data_t1d  <- split_area(area_islets_t1d, "ins_area")
+alpha_15plus_data_t1d <- split_area(area_islets_t1d, "glu_area")
+delta_15plus_data_t1d <- split_area(area_islets_t1d, "soma_area")
+pp_15plus_data_t1d    <- split_area(area_islets_t1d, "pp_area")
+
+area_beta_15plus_t1d <- glmmTMB(area_t1d_full_formula("log_ins_area"), 
+                                  data = beta_15plus_data_t1d, 
+                                  family = gaussian())
+saveRDS(area_beta_15plus_t1d, "Area/Models/Total_Area/area_beta_15plus_t1d.rds"); rm(area_beta_15plus_t1d); gc()
+
+area_alpha_15plus_t1d <- glmmTMB(area_t1d_full_formula("log_glu_area"), 
+                                   data = alpha_15plus_data_t1d, 
+                                   family = gaussian())
+saveRDS(area_alpha_15plus_t1d, "Area/Models/Total_Area/area_alpha_15plus_t1d.rds"); rm(area_alpha_15plus_t1d); gc()
+
+area_delta_15plus_t1d <- glmmTMB(area_t1d_full_formula("log_soma_area"), 
+                                   data = delta_15plus_data_t1d, 
+                                   family = gaussian())
+saveRDS(area_delta_15plus_t1d, "Area/Models/Total_Area/area_delta_15plus_t1d.rds"); rm(area_delta_15plus_t1d); gc()
+
+area_pp_15plus_t1d <- glmmTMB(area_t1d_full_formula("log_pp_area"), 
+                                data = pp_15plus_data_t1d, 
+                                family = gaussian())
+saveRDS(area_pp_15plus_t1d, "Area/Models/Total_Area/area_pp_15plus_t1d.rds"); rm(area_pp_15plus_t1d); gc()
+```
+
+## T1D — Combined (Total Area)
+
+```{r area-t1d-combined}
+beta_combined_model_t1d <- glmmTMB(log_ins_area ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                                 Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c + 
+                                 object_type * Disease.Duration_c + object_type * Region +
+                                 (1|Donor) + (1|Donor:ImageID),
+                               data = beta_combined_t1d, 
+                               family = gaussian())
+saveRDS(beta_combined_model_t1d, "Area/Models/Total_Area/beta_combined_t1d.rds"); rm(beta_combined_model_t1d); gc()
+
+alpha_combined_model_t1d <- glmmTMB(log_glu_area ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 + 
+                                  Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c + 
+                                  object_type * Disease.Duration_c + object_type * Region + 
+                                  (1|Donor) + (1|Donor:ImageID),
+                                data = alpha_combined_t1d, 
+                                family = gaussian())
+saveRDS(alpha_combined_model_t1d, "Area/Models/Total_Area/alpha_combined_t1d.rds"); rm(alpha_combined_model_t1d); gc()
+
+delta_combined_model_t1d <- glmmTMB(log_soma_area ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 + 
+                                  Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c + 
+                                  object_type * Disease.Duration_c + object_type * Region + 
+                                  (1|Donor) + (1|Donor:ImageID), 
+                                data = delta_combined_t1d, 
+                                family = gaussian())
+saveRDS(delta_combined_model_t1d, "Area/Models/Total_Area/delta_combined_t1d.rds"); rm(delta_combined_model_t1d); gc()
+
+pp_combined_model_t1d <- glmmTMB(log_pp_area ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 + 
+                               Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c + 
+                               object_type * Disease.Duration_c + object_type * Region + 
+                               (1|Donor) + (1|Donor:ImageID), 
+                             data = pp_combined_t1d, 
+                             family = gaussian())
+saveRDS(pp_combined_model_t1d, "Area/Models/Total_Area/pp_combined_t1d.rds"); rm(pp_combined_model_t1d); gc()
+```
+
+# Per-Cell Area Models — All Gaussian on log(area/count)
+
+Per-cell area = total cell-type area / cell-type count within each islet.
+Isolates individual cell size from cell number. Family choice informed by
+`per_cell_area_diagnostics.Rmd`: Gaussian on log(per-cell area) wins by
+ΔAIC = 250K–5M over Gamma and lognormal in all 12 combinations. Insulin
+multi-cell/islet subsets have conservative underdispersion (0.45–0.55).
+
+**Singlet models are not built here.** For singlets (Islet.Cells == 1),
+per-cell area ≡ total area (dividing by 1 changes nothing). Reference the
+existing total area singlet models in `Area/Models/area_*_1cell*.rds` instead.
+
+## Diagnosis — Small EOs (Per-Cell Area)
+
+```{r pc-diag-smallEO}
+beta_2to14_pc  <- split_per_cell(area_endobs, "ins_area")
+alpha_2to14_pc <- split_per_cell(area_endobs, "glu_area")
+delta_2to14_pc <- split_per_cell(area_endobs, "soma_area")
+pp_2to14_pc    <- split_per_cell(area_endobs, "pp_area")
+
+pc_beta_2to14 <- glmmTMB(pc_seo_formula("log_ins_area_pc"),
+                         data = beta_2to14_pc, family = gaussian())
+saveRDS(pc_beta_2to14, "Area/Models/Per_Cell_Area/pc_beta_2to14.rds"); rm(pc_beta_2to14); gc()
+
+pc_alpha_2to14 <- glmmTMB(pc_seo_formula("log_glu_area_pc"),
+                          data = alpha_2to14_pc, family = gaussian())
+saveRDS(pc_alpha_2to14, "Area/Models/Per_Cell_Area/pc_alpha_2to14.rds"); rm(pc_alpha_2to14); gc()
+
+pc_delta_2to14 <- glmmTMB(pc_seo_formula("log_soma_area_pc"),
+                          data = delta_2to14_pc, family = gaussian())
+saveRDS(pc_delta_2to14, "Area/Models/Per_Cell_Area/pc_delta_2to14.rds"); rm(pc_delta_2to14); gc()
+
+pc_pp_2to14 <- glmmTMB(pc_seo_formula("log_pp_area_pc"),
+                       data = pp_2to14_pc, family = gaussian())
+saveRDS(pc_pp_2to14, "Area/Models/Per_Cell_Area/pc_pp_2to14.rds"); rm(pc_pp_2to14); gc()
+```
+
+## Diagnosis — Islets (Per-Cell Area)
+
+```{r pc-diag-islets}
+beta_15plus_pc  <- split_per_cell(area_islets, "ins_area")
+alpha_15plus_pc <- split_per_cell(area_islets, "glu_area")
+delta_15plus_pc <- split_per_cell(area_islets, "soma_area")
+pp_15plus_pc    <- split_per_cell(area_islets, "pp_area")
+
+pc_beta_15plus <- glmmTMB(pc_full_formula("log_ins_area_pc"),
+                          data = beta_15plus_pc, family = gaussian())
+saveRDS(pc_beta_15plus, "Area/Models/Per_Cell_Area/pc_beta_15plus.rds"); rm(pc_beta_15plus); gc()
+
+pc_alpha_15plus <- glmmTMB(pc_full_formula("log_glu_area_pc"),
+                           data = alpha_15plus_pc, family = gaussian())
+saveRDS(pc_alpha_15plus, "Area/Models/Per_Cell_Area/pc_alpha_15plus.rds"); rm(pc_alpha_15plus); gc()
+
+pc_delta_15plus <- glmmTMB(pc_full_formula("log_soma_area_pc"),
+                           data = delta_15plus_pc, family = gaussian())
+saveRDS(pc_delta_15plus, "Area/Models/Per_Cell_Area/pc_delta_15plus.rds"); rm(pc_delta_15plus); gc()
+
+pc_pp_15plus <- glmmTMB(pc_full_formula("log_pp_area_pc"),
+                        data = pp_15plus_pc, family = gaussian())
+saveRDS(pc_pp_15plus, "Area/Models/Per_Cell_Area/pc_pp_15plus.rds"); rm(pc_pp_15plus); gc()
+```
+
+## Diagnosis — Combined (Per-Cell Area)
+
+```{r pc-diag-combined}
+beta_comb_pc <- split_per_cell(beta_combined, "ins_area")
+pc_beta_combined <- glmmTMB(log_ins_area_pc ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                              Diagnosis:Region:Age_c + log_Islet.Cells_c +
+                              object_type * Diagnosis + object_type * Region +
+                              (1|Donor) + (1|Donor:ImageID),
+                            data = beta_comb_pc, family = gaussian())
+saveRDS(pc_beta_combined, "Area/Models/Per_Cell_Area/pc_beta_combined.rds"); rm(pc_beta_combined); gc()
+
+alpha_comb_pc <- split_per_cell(alpha_combined, "glu_area")
+pc_alpha_combined <- glmmTMB(log_glu_area_pc ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                               Diagnosis:Region:Age_c + log_Islet.Cells_c +
+                               object_type * Diagnosis + object_type * Region +
+                               (1|Donor) + (1|Donor:ImageID),
+                             data = alpha_comb_pc, family = gaussian())
+saveRDS(pc_alpha_combined, "Area/Models/Per_Cell_Area/pc_alpha_combined.rds"); rm(pc_alpha_combined); gc()
+
+delta_comb_pc <- split_per_cell(delta_combined, "soma_area")
+pc_delta_combined <- glmmTMB(log_soma_area_pc ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                               Diagnosis:Region:Age_c + log_Islet.Cells_c +
+                               object_type * Diagnosis + object_type * Region +
+                               (1|Donor) + (1|Donor:ImageID),
+                             data = delta_comb_pc, family = gaussian())
+saveRDS(pc_delta_combined, "Area/Models/Per_Cell_Area/pc_delta_combined.rds"); rm(pc_delta_combined); gc()
+
+pp_comb_pc <- split_per_cell(pp_combined, "pp_area")
+pc_pp_combined <- glmmTMB(log_pp_area_pc ~ (Diagnosis + Region + Sex + Age_c)^2 +
+                            Diagnosis:Region:Age_c + log_Islet.Cells_c +
+                            object_type * Diagnosis + object_type * Region +
+                            (1|Donor) + (1|Donor:ImageID),
+                          data = pp_comb_pc, family = gaussian())
+saveRDS(pc_pp_combined, "Area/Models/Per_Cell_Area/pc_pp_combined.rds"); rm(pc_pp_combined); gc()
+```
+
+## T1D — Small EOs (Per-Cell Area)
+
+```{r pc-t1d-smallEO}
+beta_2to14_pc_t1d  <- split_per_cell(area_endobs_t1d, "ins_area")
+alpha_2to14_pc_t1d <- split_per_cell(area_endobs_t1d, "glu_area")
+delta_2to14_pc_t1d <- split_per_cell(area_endobs_t1d, "soma_area")
+pp_2to14_pc_t1d    <- split_per_cell(area_endobs_t1d, "pp_area")
+
+pc_beta_2to14_t1d <- glmmTMB(pc_t1d_seo_formula("log_ins_area_pc"),
+                             data = beta_2to14_pc_t1d, family = gaussian())
+saveRDS(pc_beta_2to14_t1d, "Area/Models/Per_Cell_Area/pc_beta_2to14_t1d.rds"); rm(pc_beta_2to14_t1d); gc()
+
+pc_alpha_2to14_t1d <- glmmTMB(pc_t1d_seo_formula("log_glu_area_pc"),
+                              data = alpha_2to14_pc_t1d, family = gaussian())
+saveRDS(pc_alpha_2to14_t1d, "Area/Models/Per_Cell_Area/pc_alpha_2to14_t1d.rds"); rm(pc_alpha_2to14_t1d); gc()
+
+pc_delta_2to14_t1d <- glmmTMB(pc_t1d_seo_formula("log_soma_area_pc"),
+                              data = delta_2to14_pc_t1d, family = gaussian())
+saveRDS(pc_delta_2to14_t1d, "Area/Models/Per_Cell_Area/pc_delta_2to14_t1d.rds"); rm(pc_delta_2to14_t1d); gc()
+
+pc_pp_2to14_t1d <- glmmTMB(pc_t1d_seo_formula("log_pp_area_pc"),
+                           data = pp_2to14_pc_t1d, family = gaussian())
+saveRDS(pc_pp_2to14_t1d, "Area/Models/Per_Cell_Area/pc_pp_2to14_t1d.rds"); rm(pc_pp_2to14_t1d); gc()
+```
+
+## T1D — Islets (Per-Cell Area)
+
+```{r pc-t1d-islets}
+beta_15plus_pc_t1d  <- split_per_cell(area_islets_t1d, "ins_area")
+alpha_15plus_pc_t1d <- split_per_cell(area_islets_t1d, "glu_area")
+delta_15plus_pc_t1d <- split_per_cell(area_islets_t1d, "soma_area")
+pp_15plus_pc_t1d    <- split_per_cell(area_islets_t1d, "pp_area")
+
+pc_beta_15plus_t1d <- glmmTMB(pc_t1d_full_formula("log_ins_area_pc"),
+                              data = beta_15plus_pc_t1d, family = gaussian())
+saveRDS(pc_beta_15plus_t1d, "Area/Models/Per_Cell_Area/pc_beta_15plus_t1d.rds"); rm(pc_beta_15plus_t1d); gc()
+
+pc_alpha_15plus_t1d <- glmmTMB(pc_t1d_full_formula("log_glu_area_pc"),
+                               data = alpha_15plus_pc_t1d, family = gaussian())
+saveRDS(pc_alpha_15plus_t1d, "Area/Models/Per_Cell_Area/pc_alpha_15plus_t1d.rds"); rm(pc_alpha_15plus_t1d); gc()
+
+pc_delta_15plus_t1d <- glmmTMB(pc_t1d_full_formula("log_soma_area_pc"),
+                               data = delta_15plus_pc_t1d, family = gaussian())
+saveRDS(pc_delta_15plus_t1d, "Area/Models/Per_Cell_Area/pc_delta_15plus_t1d.rds"); rm(pc_delta_15plus_t1d); gc()
+
+pc_pp_15plus_t1d <- glmmTMB(pc_t1d_full_formula("log_pp_area_pc"),
+                            data = pp_15plus_pc_t1d, family = gaussian())
+saveRDS(pc_pp_15plus_t1d, "Area/Models/Per_Cell_Area/pc_pp_15plus_t1d.rds"); rm(pc_pp_15plus_t1d); gc()
+```
+
+## T1D — Combined (Per-Cell Area)
+
+```{r pc-t1d-combined}
+beta_comb_pc_t1d <- split_per_cell(beta_combined_t1d, "ins_area")
+pc_beta_combined_t1d <- glmmTMB(log_ins_area_pc ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                                  Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+                                  object_type * Disease.Duration_c + object_type * Region +
+                                  (1|Donor) + (1|Donor:ImageID),
+                                data = beta_comb_pc_t1d, family = gaussian())
+saveRDS(pc_beta_combined_t1d, "Area/Models/Per_Cell_Area/pc_beta_combined_t1d.rds"); rm(pc_beta_combined_t1d); gc()
+
+alpha_comb_pc_t1d <- split_per_cell(alpha_combined_t1d, "glu_area")
+pc_alpha_combined_t1d <- glmmTMB(log_glu_area_pc ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                                   Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+                                   object_type * Disease.Duration_c + object_type * Region +
+                                   (1|Donor) + (1|Donor:ImageID),
+                                 data = alpha_comb_pc_t1d, family = gaussian())
+saveRDS(pc_alpha_combined_t1d, "Area/Models/Per_Cell_Area/pc_alpha_combined_t1d.rds"); rm(pc_alpha_combined_t1d); gc()
+
+delta_comb_pc_t1d <- split_per_cell(delta_combined_t1d, "soma_area")
+pc_delta_combined_t1d <- glmmTMB(log_soma_area_pc ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                                   Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+                                   object_type * Disease.Duration_c + object_type * Region +
+                                   (1|Donor) + (1|Donor:ImageID),
+                                 data = delta_comb_pc_t1d, family = gaussian())
+saveRDS(pc_delta_combined_t1d, "Area/Models/Per_Cell_Area/pc_delta_combined_t1d.rds"); rm(pc_delta_combined_t1d); gc()
+
+pp_comb_pc_t1d <- split_per_cell(pp_combined_t1d, "pp_area")
+pc_pp_combined_t1d <- glmmTMB(log_pp_area_pc ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+                                Disease.Duration_c:Region:age_at_onset_c + log_Islet.Cells_c +
+                                object_type * Disease.Duration_c + object_type * Region +
+                                (1|Donor) + (1|Donor:ImageID),
+                              data = pp_comb_pc_t1d, family = gaussian())
+saveRDS(pc_pp_combined_t1d, "Area/Models/Per_Cell_Area/pc_pp_combined_t1d.rds"); rm(pc_pp_combined_t1d); gc()
+```
+
+```{r}
+# ============================================================
+# Option 2: Total area models with cell-count adjustment
+# ============================================================
+# Asks whether the cross-sectional Diagnosis effect survives
+# once you condition on cell count. If the per-cell effect was
+# driven by Halo's count-vs-area decoupling in disease tissue,
+# the Diagnosis coefficient here should collapse toward zero.
+
+# area_to_count is the same mapping you already use in split_per_cell:
+area_to_count <- list(ins_area = "Count.ins", glu_area = "Count.glu",
+                      soma_area = "Count.soma", pp_area = "Count.PP")
+
+# ---- Helper: filter to cell-type-positive objects, add log_count_c ----
+split_total_area <- function(data, cell_col) {
+  count_col    <- area_to_count[[cell_col]]
+  log_area_col <- paste0("log_", cell_col)
+
+  data %>%
+    filter(!is.na(!!sym(cell_col)) & !!sym(cell_col) > 0 &
+           !!sym(count_col) > 0) %>%
+    mutate(
+      !!log_area_col := log(!!sym(cell_col)),
+      log_count      = log(!!sym(count_col)),
+      log_count_c    = log_count - mean(log_count)
+    )
+}
+
+# ---- Formulas: identical to pc_* formulas, but outcome is log(area)
+#      not log(area/count), and log_count_c is added as a covariate ----
+
+ta_count_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c)^2 +
+    Diagnosis:Region:Age_c + log_count_c + log_count_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+ta_count_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Diagnosis + Region + Sex + Age_c + log_count_c)^2 +
+    Diagnosis:Region:log_count_c + Diagnosis:Region:Age_c + log_count_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+ta_count_t1d_seo_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c)^2 +
+    Disease.Duration_c:Region:age_at_onset_c + log_count_c + log_count_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+ta_count_t1d_full_formula <- function(log_out) {
+  as.formula(paste0(log_out, " ~ (Disease.Duration_c + Region + Sex + age_at_onset_c + log_count_c)^2 +
+    Disease.Duration_c:Region:log_count_c + Disease.Duration_c:Region:age_at_onset_c + log_count_c +
+    (1|Donor) + (1|Donor:ImageID)"))
+}
+
+# ---- Diagnosis — Small EOs (2-14 cells) ----
+beta_2to14_ta  <- split_total_area(area_endobs, "ins_area")
+alpha_2to14_ta <- split_total_area(area_endobs, "glu_area")
+delta_2to14_ta <- split_total_area(area_endobs, "soma_area")
+pp_2to14_ta    <- split_total_area(area_endobs, "pp_area")
+
+ta_beta_2to14  <- glmmTMB(ta_count_seo_formula("log_ins_area"),
+                          data = beta_2to14_ta,  family = gaussian())
+ta_alpha_2to14 <- glmmTMB(ta_count_seo_formula("log_glu_area"),
+                          data = alpha_2to14_ta, family = gaussian())
+ta_delta_2to14 <- glmmTMB(ta_count_seo_formula("log_soma_area"),
+                          data = delta_2to14_ta, family = gaussian())
+ta_pp_2to14    <- glmmTMB(ta_count_seo_formula("log_pp_area"),
+                          data = pp_2to14_ta,    family = gaussian())
+
+# ---- Diagnosis — Islets (15+ cells) ----
+beta_15plus_ta  <- split_total_area(area_islets, "ins_area")
+alpha_15plus_ta <- split_total_area(area_islets, "glu_area")
+delta_15plus_ta <- split_total_area(area_islets, "soma_area")
+pp_15plus_ta    <- split_total_area(area_islets, "pp_area")
+
+ta_beta_15plus  <- glmmTMB(ta_count_full_formula("log_ins_area"),
+                           data = beta_15plus_ta,  family = gaussian())
+ta_alpha_15plus <- glmmTMB(ta_count_full_formula("log_glu_area"),
+                           data = alpha_15plus_ta, family = gaussian())
+ta_delta_15plus <- glmmTMB(ta_count_full_formula("log_soma_area"),
+                           data = delta_15plus_ta, family = gaussian())
+ta_pp_15plus    <- glmmTMB(ta_count_full_formula("log_pp_area"),
+                           data = pp_15plus_ta,    family = gaussian())
+
+# (T1D-only versions follow the same pattern with the _t1d data and
+# ta_count_t1d_seo_formula / ta_count_t1d_full_formula. Add saveRDS calls
+# wherever you want them in your existing pipeline.)
+
+summary(ta_beta_2to14)
+summary(ta_beta_15plus)
+
+summary(ta_alpha_2to14)
+summary(ta_alpha_15plus)
+
+summary(ta_delta_2to14)
+summary(ta_delta_15plus)
+
+summary(ta_pp_2to14)
+summary(ta_pp_15plus)
+```
+
+
+```{r final-summary}
+cat("\n================================================================\n")
+cat("  ALL MODELS COMPLETE\n")
+cat("================================================================\n\n")
+cat("Family choices (from diagnostics):\n")
+cat("  Density:         Gamma(log)\n")
+cat("  Count.ins:       NB1 (AIC winner by 80K; underdispersion = conservative SEs)\n")
+cat("  Count.glu:       ZINB1, zi ~ Diagnosis (ΔAIC = -5170 vs NB1)\n")
+cat("  Count.soma:      NB1 (disp = 0.88)\n")
+cat("  Count.PP:        NB1 (disp = 1.05)\n")
+cat("  Islet.Cells:     NB2 (AIC winner; disp = 1.36; ZINB worse by +4)\n")
+cat("  All total area:  Gaussian on log(area) (LogNorm disp 0.84-1.01)\n")
+cat("  All per-cell:    Gaussian on log(area/count) (ΔAIC 250K-5M vs Gamma/LN)\n")
+cat("                   Insulin multi-cell/islet underdispersed (0.45-0.55)\n\n")
+
+cat("Per-cell area note: Singlet models not built — for singlets,\n")
+cat("per-cell area ≡ total area (count = 1). Reference Area/Models/area_*_1cell*.rds.\n\n")
+
+for (d in c("Density/Models","Count/Models","Area/Models/Total_Area/", "Area/Models/Per_Cell_Area/")) {
+  files <- list.files(d, pattern = "\\.rds$")
+  cat(d, ":", length(files), "models\n")
+  for (f in files) cat("  ", f, "\n")
+}
+
+cat(sprintf("\nTotal models in this file: %d\n",
+  sum(sapply(c("Density/Models","Count/Models","Area/Models/Total_Area/", "Area/Models/Per_Cell_Area/"),
+             function(d) length(list.files(d, pattern = "\\.rds$"))))))
+cat("  + HTC cluster models (proportion & ratio ordbetareg)\n")
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

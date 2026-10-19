@@ -41,7 +41,7 @@ library(tidyverse)
 # DATA PREPARATION
 # ============================================================
 
-quad_data <- read_csv("/ihome/hpark/het29/nPOD/quad_data.csv")
+quad_data <- read_csv("Data/quad_data.csv")
 
 quad_data$log_Islet.Cells <- as.numeric(quad_data$log_Islet.Cells)
 

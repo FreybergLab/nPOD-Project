@@ -146,6 +146,6 @@ All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files 
 
 ## Citation, license and contact
 
-- **Citation:** **[TO ADD]**
+- **Citation:** https://www.biorxiv.org/content/10.64898/2026.06.05.730081v1
 - **License:** **[TO ADD]**. Without a license file, others have no permission to reuse the code.
 - **Contact:** **[TO ADD]**

@@ -64,6 +64,10 @@ comparable with the count models. The subset mean of `Age_c` is printed for each
 model, since the Diagnosis contrast is evaluated at `Age_c = 0` and that is no
 longer exactly the subset mean.
 
+```{r root, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse)

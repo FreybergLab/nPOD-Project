@@ -44,6 +44,10 @@ Four caveats that belong in any write-up of this:
 3. **Two-dimensional sections**, so these are areal densities, not volumetric.
 4. **Cross-sectional.** No islet is observed before and after.
 
+```{r root, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse)

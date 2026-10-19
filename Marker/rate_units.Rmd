@@ -19,6 +19,10 @@ counting marker-positive cells from islets where the denominator was zero —
 cells with no denominator at all, which is not a rate. Everything below uses the
 model's own subset.
 
+```{r root, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 library(tidyverse)

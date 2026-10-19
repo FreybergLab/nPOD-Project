@@ -2,7 +2,7 @@
 
 R code for the analysis reported in:
 
-> Ward, Banks-Tibbs, Thorpe, *et al.* Artificial intelligence–guided analysis of human islet sociology reveals compositional remodeling in type 1 diabetes. **[TO ADD: journal, year, DOI]**
+> Ward, Banks-Tibbs, Thorpe, *et al.* Artificial intelligence–guided analysis of human islet sociology reveals compositional remodeling in type 1 diabetes.
 
 The code builds analysis datasets from HALO image-analysis exports of pancreatic sections from nPOD and HPAP organ donors. It then fits the statistical models: mixed models with glmmTMB locally, and Bayesian ordered beta regression with brms/cmdstanr on a computing cluster. Finally, it produces the figures, Table 1, and Supplementary Table 2. The raw image-analysis exports are not included (see [Data](#data)).
 

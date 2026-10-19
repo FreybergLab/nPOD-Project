@@ -63,14 +63,12 @@ Endocrine-object size classes and the islet thresholds are defined in `Create_co
 
 ## Requirements
 
-**R.** Local analyses: **[TO ADD: R version]**. Cluster models: R 4.5.0.
+**R.** Local analyses: R 4.4.2. Cluster models: R 4.5.0.
 
 **Packages:**
 - **Data handling and plotting:** tidyverse (dplyr, readr, stringr, ggplot2 3.5.1), janitor, readxl, openxlsx, writexl, patchwork, cowplot, ggtext, rlang, knitr, officer, flextable
 - **Mixed models:** glmmTMB 1.1.9, emmeans 1.10.4, car
 - **Bayesian models:** brms 2.22.0, ordbetareg 0.8, cmdstanr 0.9.0 with CmdStan 2.37.0, coda
-
-Full session information: **[TO ADD: `sessionInfo.txt` or `renv.lock`]**
 
 ## Running the analysis
 
@@ -103,7 +101,7 @@ for (d in c("Data", "Density/Models", "Count/Models",
 | `ratio_diagnosis_HTC.R` | `ratio_{powered,mid,full}_model` | `Ratio/Models/` |
 | `ratio_t1d_HTC.R` | `ratio_{ao,dd}_model` | `Ratio/Models/` |
 
-All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files to the working directory; the others write to `Models/`. **[TO ADD: the sbatch files used to submit these jobs.]**
+All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files to the working directory; the others write to `Models/`.
 
 **Step 5: run the Ki-67 and CD3 analyses** (`Marker/`).
 
@@ -137,8 +135,8 @@ All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files 
 
 - **Figure 1** is a schematic.
 - **Supplementary Figure 1** shows annotated images.
-- **Supplementary Figures 2–3** (classifier validation) were made in GraphPad Prism 10.4.0 from manual versus AI cell counts. **[TO ADD: the validation counts as a data file.]**
-- **Supplementary Figure 4** (endocrine-object size distribution and thresholds). **[TO ADD: code.]**
+- **Supplementary Figures 2–3** (classifier validation) were made in GraphPad Prism 10.4.0 from manual versus AI cell counts.
+- **Supplementary Figure 4** (endocrine-object size distribution and thresholds).
 
 ## Results folder
 

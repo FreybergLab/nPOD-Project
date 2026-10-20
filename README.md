@@ -30,7 +30,8 @@ Each analysis folder (`Density/`, `Proportion/`, `Count/`, `Ratio/`, `Area/`) ha
 ## Data
 
 **Raw inputs (not included; too large for GitHub).** These are the HALO per-object and summary exports for three analyses: the phenotyper (cell counts per object), area quantification, and the Ki-67, CD3 and CD45 marker analyses. The tissue comes from nPOD and HPAP. 
-Data is available here: DOI:10.5281/zenodo.23423201
+
+Data is available at this link: DOI:10.5281/zenodo.23423201
 
 Set the raw-data locations before running:
 

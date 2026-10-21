@@ -55,6 +55,24 @@ get_posterior_fitted <- function(model, newdata, ndraws = NULL) {
          summary = FALSE, ndraws = ndraws)
 }
 
+# Where a model's centred variable is 0, in raw units. The published T1D models
+# were centred on ND + T1D islets, not on the T1D data passed in for plotting,
+# so the offset must come from the model's own data rather than mean(raw).
+# For a model centred on the plotted data itself, this equals mean(raw).
+model_zero <- function(model, data, raw, centred) {
+  if (!centred %in% names(model$data)) return(mean(data[[raw]], na.rm = TRUE))
+  if (nrow(data) != nrow(model$data)) {
+    warning(sprintf("plot data has %d rows but the model has %d; the %s axis may be offset",
+                    nrow(data), nrow(model$data), raw))
+  }
+  mean(data[[raw]], na.rm = TRUE) - mean(model$data[[centred]], na.rm = TRUE)
+}
+
+# T1D average of a centred predictor, in the model's own units. The published
+# T1D models were centred on ND + T1D data, so their 0 is not the T1D average;
+# for a model centred on T1D data this is 0 and nothing changes.
+t1d_average <- function(model, var) mean(model$data[[var]], na.rm = TRUE)
+
 summarize_posterior <- function(x, prob = 0.95) {
   hpd <- coda::HPDinterval(coda::as.mcmc(x), prob = prob)
   tibble(
@@ -97,11 +115,11 @@ get_onset_predictions <- function(model, data, focal_var, focal_range, n_points 
   
   for (i in seq_len(nrow(grid))) {
     nd <- data.frame(
-      age_at_onset_c = if (focal_var == "age_at_onset_c") focal_seq else 0,
-      Disease.Duration_c = if (focal_var == "Disease.Duration_c") focal_seq else 0,
+      age_at_onset_c = if (focal_var == "age_at_onset_c") focal_seq else t1d_average(model, "age_at_onset_c"),
+      Disease.Duration_c = if (focal_var == "Disease.Duration_c") focal_seq else t1d_average(model, "Disease.Duration_c"),
       Region = factor(grid$Region[i], levels = levels(data$Region)),
       Sex = factor(grid$Sex[i], levels = levels(data$Sex)),
-      log_Islet.Cells_c = 0,
+      log_Islet.Cells_c = t1d_average(model, "log_Islet.Cells_c"),
       Donor = NA,
       ImageID = NA
     )
@@ -154,18 +172,18 @@ get_slope_pd <- function(model, focal_var, data) {
   
   for (i in seq_len(nrow(grid))) {
     nd_low <- data.frame(
-      age_at_onset_c = if (focal_var == "age_at_onset_c") -1 else 0,
-      Disease.Duration_c = if (focal_var == "Disease.Duration_c") -1 else 0,
+      age_at_onset_c = t1d_average(model, "age_at_onset_c") - (focal_var == "age_at_onset_c"),
+      Disease.Duration_c = t1d_average(model, "Disease.Duration_c") - (focal_var == "Disease.Duration_c"),
       Region = factor(grid$Region[i], levels = levels(data$Region)),
       Sex = factor(grid$Sex[i], levels = levels(data$Sex)),
-      log_Islet.Cells_c = 0,
+      log_Islet.Cells_c = t1d_average(model, "log_Islet.Cells_c"),
       Donor = NA, ImageID = NA
     )
     nd_high <- nd_low
     if (focal_var == "age_at_onset_c") {
-      nd_high$age_at_onset_c <- 1
+      nd_high$age_at_onset_c <- t1d_average(model, "age_at_onset_c") + 1
     } else {
-      nd_high$Disease.Duration_c <- 1
+      nd_high$Disease.Duration_c <- t1d_average(model, "Disease.Duration_c") + 1
     }
     
     post_low <- get_posterior_fitted(model, nd_low)
@@ -186,8 +204,8 @@ get_slope_pd <- function(model, focal_var, data) {
 
 plot_onset_panel <- function(data, model, outcome_var, cell_label, y_max = NULL) {
   
-  onset_mean <- mean(data$age_at_onset, na.rm = TRUE)
-  onset_range <- range(data$age_at_onset_c, na.rm = TRUE)
+  onset_mean <- model_zero(model, data, "age_at_onset", "age_at_onset_c")
+  onset_range <- range(data$age_at_onset, na.rm = TRUE) - onset_mean
   
   # Model predictions
   preds <- get_onset_predictions(model, data, "age_at_onset_c", onset_range)
@@ -235,8 +253,8 @@ plot_onset_panel <- function(data, model, outcome_var, cell_label, y_max = NULL)
 
 plot_duration_panel <- function(data, model, outcome_var, cell_label, y_max = NULL) {
   
-  dur_mean <- mean(data$Disease.Duration, na.rm = TRUE)
-  dur_range <- range(data$Disease.Duration_c, na.rm = TRUE)
+  dur_mean <- model_zero(model, data, "Disease.Duration", "Disease.Duration_c")
+  dur_range <- range(data$Disease.Duration, na.rm = TRUE) - dur_mean
   
   # Model predictions
   preds <- get_onset_predictions(model, data, "Disease.Duration_c", dur_range)

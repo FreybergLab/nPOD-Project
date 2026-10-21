@@ -1,0 +1,692 @@
+---
+title: "Ki-67 / CD3 / CD45 Marker Dataset Pipeline"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+Builds the six marker datasets consumed by `marker_count_models_v4.Rmd`:
+
+| Output | Description |
+|---|---|
+| `ki67_data.csv` / `ki67_data_t1d.csv` | Ki-67+ counts per islet, with demographics |
+| `cd3_data.csv` / `cd3_data_t1d.csv` | CD3+ counts per islet |
+| `cd45_data.csv` / `cd45_data_t1d.csv` | CD45+ counts per islet |
+
+Split out of `Create_unified_dataset_v8.Rmd` Parts D/E/F. Those were three
+near-identical copies of the same 200-line block; here it is one function
+called three times, which is most of the reduction from ~1100 lines to ~400.
+
+**Inputs.** Run `Create_count_datasets_v1.Rmd` first. This file reads two of
+its outputs and never re-reads the count CSVs:
+
+- `Data/no_cutoff_data.rds` — demographics, `Islet.Cells`, `Count.Acinar`,
+  `Stain`, `log_Islet.Cells`, with every donor-level fix already applied
+- `Data/phenotyper_geometry.rds` — bounding boxes per
+  `(source_file, Object.Id)`
+
+Plus the three marker CSV folders (paths in the setup chunk).
+
+## Structural change from Parts D/E/F
+
+v8 de-duplicated the phenotyper data to physical islets for *matching* (D2),
+then joined marker values back onto the **full** phenotyper table (D5), which
+re-expanded every physical islet to one row per classifier run. A single islet
+therefore contributed several rows carrying an identical outcome value but
+different `Islet.Cells` — a Single-stain run only detects insulin, so its
+`Islet.Cells` is not comparable to a Quad run's. Nothing in the model formulas
+absorbed that.
+
+Here the collapse happens once, at the top, and stays collapsed: one row per
+physical islet throughout, keeping the classifier run that detects the most
+endocrine cell types (Quad > Double > Single). Matching still runs against
+*all* physical islets, including ones Part A will later drop, so a marker
+object cannot be mis-assigned to a neighbouring islet just because its true
+partner was excluded.
+
+## Other changes carried over from the v8 notes
+
+1. `total_cells` is the sum of the three phenotyper columns
+   (`insulin_cells + glucagon_cells + acinar_cells`), **not** `Total.Cells` —
+   direct instruction from the HALO operator to ignore `Total.Cells`/`Hema`
+   regardless of what a given image's classifier settings say. `Total.Cells` is
+   kept as `total_cells_raw` for reference. There is consequently no donor
+   exclusion for 6413/6417: those looked anomalous only under `Total.Cells`.
+2. Classifier-name variants are coalesced by regex, not literal string.
+   `read.csv()` mangles headers through `make.names()`, so
+   `"Ki-67 Phenotyper - Insulin Cells"` arrives as
+   `"Ki.67.Phenotyper...Insulin.Cells"` — every space *and* hyphen becomes its
+   own `.`. An earlier version used literal suffixes, matched nothing, and
+   silently turned every hormone-composition column into `NA`. There is now a
+   hard stop if any component comes back mostly missing.
+3. The marker-count ceiling is `total_cells <= Islet.Cells + Count.Acinar`.
+   v8 used `total_cells <= exp(log_Islet.Cells)`, i.e. `<= Islet.Cells` — but
+   `Islet.Cells = Count.ins + Count.glu + Count.soma + Count.PP` excludes
+   acinar cells while `total_cells` includes marker-positive acinar cells, so
+   v8 was comparing a numerator against a denominator that omits part of the
+   numerator. It discarded legitimate rows wherever an islet carried
+   peri-islet acinar signal, preferentially at small islet sizes.
+4. `Islet.Cells >= 15`, matching `full_data` in the count pipeline. v8's marker
+   datasets applied only the upper bound, so they were the one place pooling
+   objects with 1–14 endocrine cells in with real islets.
+5. The HALO operator flagged ~10 specific 6417 image IDs as genuinely
+   quad-stained (a physical-stain problem, not a settings mix-up). Not
+   implemented as a filter because none were found in the export this was
+   checked against — the setup chunk lists them and the run reports whether any
+   are present, rather than leaving that as a note to remember.
+
+**Percentages are deliberately not computed here.** `glu_prolif_rate`,
+`ins_prolif_rate` and the `*_impossible` flags are gone. The inputs they need
+are all preserved in the output (`Count.ins`, `Count.glu`, the marker
+`*_cells` counts and the `pct_*_positive` columns), so they can be derived
+later without rebuilding anything.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+# janitor is not needed: v8 called clean_names() on the joined frame, but here
+# every column is selected and renamed explicitly.
+
+dir.create("Data", showWarnings = FALSE)
+
+# ---- inputs ---------------------------------------------------------------
+NO_CUTOFF_RDS <- "Data/no_cutoff_data.rds"
+GEOMETRY_RDS  <- "Data/phenotyper_geometry.rds"
+
+# Check these first if anything fails - they are absolute, unlike v8's
+# relative "ki67_data" which assumed the working directory was F:/Work/nPod_final_v4.
+MARKER_PATHS <- list(
+  ki67 = "F:/Work/nPod_final_v4/ki67_data",
+  cd3  = "F:/Work/nPod_final_v4/cd3_data",
+  cd45 = "F:/Work/nPod_final_v4/cd45_data"
+)
+
+# ---- parameters -----------------------------------------------------------
+MIN_ISLET_CELLS  <- 15    # lower size bound; 1 reproduces v8
+LOG_ISLET_MAX    <- 5.5   # upper bound: one islet, not two merged by segmentation
+MATCH_RADIUS     <- 20    # matcher search radius, px
+MATCH_MAX_DIST   <- 15    # kept after matching
+MATCH_MIN_AREA   <- 0.5   # min bounding-box area ratio between the two objects
+STAIN_PREFERENCE <- c("Quad", "Double", "Single")
+
+# All three marker exports name their classifier columns as Ki-67 Phenotyper
+# variants, including the CD3 and CD45 ones - that is the operator's naming, not
+# a copy-paste error carried over from Part D. The matched columns are printed
+# per marker so a naming change shows up instead of silently matching nothing.
+MARKER_COL_PATTERN <- "Ki\\.?_?67"
+
+# Flagged by the HALO operator as physically quad-stained and to be excluded if
+# present. Reported rather than silently assumed absent.
+QUAD_STAINED_IMAGES <- character(0)   # e.g. c("191012", "191015")
+```
+
+# Helpers
+
+```{r helpers}
+# Coalesce every column whose name matches `pattern` into one, taking whichever
+# value is non-NA. Each row only has a real value in whichever classifier
+# variant produced it, so there is no ambiguity about which wins.
+#
+# `pattern` must match make.names()-mangled headers: pass
+# "Insulin[^A-Za-z]*Cells$" (any run of non-letters between the words), never a
+# literal "Insulin Cells".
+coalesce_by_pattern <- function(data, pattern) {
+  cols <- data[grepl(pattern, names(data))]
+  if (length(cols) == 0) return(rep(NA_real_, nrow(data)))
+  Reduce(dplyr::coalesce, cols)
+}
+
+# Row-count ledger. dplyr::filter() drops NA rows silently, which matters here:
+# total_cells is a sum of coalesced columns, so one missing component makes it
+# NA and a ceiling filter would then remove that row without saying so.
+filter_log <- function(df, cond, label) {
+  keep  <- rlang::eval_tidy(rlang::enquo(cond), df)
+  n_na  <- sum(is.na(keep))
+  keep2 <- !is.na(keep) & keep
+  cat(sprintf("  %-46s %8d -> %8d  (%5.2f%% dropped%s)\n",
+              label, nrow(df), sum(keep2),
+              100 * (1 - sum(keep2) / max(nrow(df), 1)),
+              if (n_na > 0) sprintf(", %d NA", n_na) else ""))
+  df[keep2, , drop = FALSE]
+}
+
+# Greedy nearest-centroid matcher, 1-to-1 within an image. Unchanged in
+# behaviour from D3; it just returns keys instead of row indices.
+match_one_image <- function(marker, islets, radius = MATCH_RADIUS) {
+  m <- marker %>% mutate(cx = (XMin + XMax) / 2, cy = (YMin + YMax) / 2,
+                         .i = row_number())
+  p <- islets %>% mutate(cx = (XMin + XMax) / 2, cy = (YMin + YMax) / 2,
+                         .j = row_number())
+
+  pairs <- expand.grid(.i = m$.i, .j = p$.j) %>%
+    mutate(dist = sqrt((m$cx[.i] - p$cx[.j])^2 + (m$cy[.i] - p$cy[.j])^2)) %>%
+    filter(dist <= radius) %>%
+    arrange(dist)
+  if (nrow(pairs) == 0) return(NULL)
+
+  used_m <- logical(nrow(m)); used_p <- logical(nrow(p))
+  keep   <- logical(nrow(pairs))
+  for (k in seq_len(nrow(pairs))) {
+    if (!used_m[pairs$.i[k]] && !used_p[pairs$.j[k]]) {
+      keep[k] <- TRUE
+      used_m[pairs$.i[k]] <- TRUE
+      used_p[pairs$.j[k]] <- TRUE
+    }
+  }
+  pairs <- pairs[keep, , drop = FALSE]
+
+  a_m <- (m$XMax[pairs$.i] - m$XMin[pairs$.i]) * (m$YMax[pairs$.i] - m$YMin[pairs$.i])
+  a_p <- (p$XMax[pairs$.j] - p$XMin[pairs$.j]) * (p$YMax[pairs$.j] - p$YMin[pairs$.j])
+
+  tibble(marker_uid = m$marker_uid[pairs$.i],
+         islet_uid  = p$islet_uid[pairs$.j],
+         dist_px    = pairs$dist,
+         area_ratio = pmin(a_m, a_p) / pmax(a_m, a_p))
+}
+
+# Read every CSV under a folder, tolerating per-file failures.
+read_halo_folder <- function(path, label) {
+  if (!dir.exists(path)) stop(label, ": folder not found - ", path)
+  files <- list.files(path, pattern = "\\.csv$", recursive = TRUE,
+                      full.names = TRUE)
+  files <- files[!grepl("Total_Summary_Results\\.csv$", files)]
+  cat(sprintf("  %s: %d CSV files\n", label, length(files)))
+  if (length(files) == 0) stop(label, ": no CSVs found under ", path)
+
+  out <- lapply(files, function(f) {
+    tryCatch({
+      df <- read.csv(f, stringsAsFactors = FALSE)
+      df$source_file <- basename(f)
+      df$folder_id   <- basename(dirname(dirname(dirname(dirname(f)))))
+      df
+    }, error = function(e) {
+      cat("  ERROR reading", f, ":", conditionMessage(e), "\n"); NULL
+    })
+  })
+  bind_rows(out) %>%
+    mutate(
+      folder_id = case_when(
+        folder_id == "030" ~ "HPAP030", folder_id == "041" ~ "HPAP041",
+        folder_id == "048" ~ "HPAP048", folder_id == "068" ~ "HPAP068",
+        folder_id == "078" ~ "HPAP078", TRUE ~ folder_id
+      ),
+      ImageID = str_extract(source_file, "\\d+")
+    )
+}
+```
+
+# Step 1: phenotyper islets
+
+```{r phenotyper-islets}
+for (f in c(NO_CUTOFF_RDS, GEOMETRY_RDS)) {
+  if (!file.exists(f)) {
+    stop("missing ", f, " - run Create_count_datasets_v1.Rmd first")
+  }
+}
+
+no_cutoff_data     <- readRDS(NO_CUTOFF_RDS)
+phenotyper_geometry <- readRDS(GEOMETRY_RDS)
+
+# ---- demographics, keyed on the one unique phenotyper key -----------------
+# (source_file, Object.Id) is the key that uniquely identifies a phenotyper
+# row. v8 joined on (Donor, ImageID, Object.Id), which is NOT unique: Object.Id
+# is assigned per analysis run, so the Single/Double/Quad runs of one image each
+# contain an Object.Id 1, 2, 3, ... referring to different physical objects. A
+# left_join on a non-unique key silently multiplies rows and can attach another
+# run's Islet.Cells / Count.ins / Count.glu to a row. Part A already uses this
+# key to join location_lookup.
+required_ncd <- c("source_file", "Object.Id", "Donor", "ImageID", "Region",
+                  "Sex", "Age", "AgeCat", "Diagnosis", "Disease.Duration",
+                  "age_at_onset", "Stain", "Count.ins", "Count.glu",
+                  "Count.Acinar", "Islet.Cells", "log_Islet.Cells")
+missing_ncd <- setdiff(required_ncd, names(no_cutoff_data))
+if (length(missing_ncd) > 0) {
+  stop("no_cutoff_data.rds is missing: ", paste(missing_ncd, collapse = ", "))
+}
+
+demo <- no_cutoff_data %>%
+  mutate(source_file = as.character(source_file),
+         Object.Id   = as.integer(Object.Id),
+         Donor       = as.character(Donor),
+         ImageID_ncd = as.character(ImageID),
+         Region      = as.character(Region),
+         Stain       = as.character(Stain)) %>%
+  dplyr::select(source_file, Object.Id, Donor, ImageID_ncd, Region, Sex, Age,
+                AgeCat, Diagnosis, Disease.Duration, age_at_onset, Stain,
+                Count.ins, Count.glu, Count.Acinar, Islet.Cells,
+                log_Islet.Cells) %>%
+  distinct()
+
+dup_demo <- demo %>% count(source_file, Object.Id) %>% filter(n > 1)
+cat("demo rows:", nrow(demo),
+    "| duplicate (source_file, Object.Id) keys:", nrow(dup_demo),
+    "(must be 0)\n")
+if (nrow(dup_demo) > 0) {
+  print(head(dup_demo, 20))
+  stop("(source_file, Object.Id) is not unique in no_cutoff_data")
+}
+
+# How bad the v8 key was, for the record.
+v8_dup <- no_cutoff_data %>%
+  mutate(Donor = as.character(Donor), ImageID = as.character(ImageID),
+         Object.Id = as.integer(Object.Id)) %>%
+  distinct(Donor, ImageID, Object.Id, Islet.Cells, Count.ins, Count.glu, Region) %>%
+  count(Donor, ImageID, Object.Id) %>%
+  filter(n > 1)
+cat("v8 key (Donor, ImageID, Object.Id): ", nrow(v8_dup), " duplicated keys",
+    if (nrow(v8_dup) > 0) " <- v8 was multiplying rows here" else
+      " (v8 key happened to be safe on this data)", "\n", sep = "")
+
+# ---- collapse to one row per physical islet ------------------------------
+# Stain is constant within a source_file (one algorithm per export, plus A5's
+# per-image fix), so it can be looked up per file and used to rank the runs.
+# Files absent from no_cutoff_data get NA and rank last; their objects are
+# still available as match candidates, which is the point.
+stain_by_file <- demo %>% distinct(source_file, Stain)
+if (any(duplicated(stain_by_file$source_file))) {
+  print(stain_by_file %>%
+          filter(source_file %in% source_file[duplicated(source_file)]))
+  stop("Stain is not constant within a source_file - the classifier-run ",
+       "ranking used to pick one row per physical islet would be arbitrary.")
+}
+
+geom <- phenotyper_geometry %>%
+  mutate(source_file = as.character(source_file),
+         ImageID     = as.character(ImageID),
+         Object.Id   = as.integer(Object.Id),
+         islet_uid   = paste(ImageID, XMin, XMax, YMin, YMax, sep = "_")) %>%
+  left_join(stain_by_file, by = "source_file") %>%
+  mutate(stain_rank = match(Stain, STAIN_PREFERENCE),
+         stain_rank = ifelse(is.na(stain_rank),
+                             length(STAIN_PREFERENCE) + 1L, stain_rank))
+
+phenotyper_islets <- geom %>%
+  arrange(islet_uid, stain_rank, Object.Id) %>%
+  distinct(islet_uid, .keep_all = TRUE)
+
+cat(sprintf("\nphenotyper rows (all classifier runs): %d\n", nrow(geom)))
+cat(sprintf("distinct physical islets:             %d  (x%.2f collapse)\n",
+            nrow(phenotyper_islets),
+            nrow(geom) / max(nrow(phenotyper_islets), 1)))
+cat("classifier run retained per islet:\n")
+print(table(phenotyper_islets$Stain, useNA = "ifany"))
+
+# Matching is done per ImageID alone, so an ImageID shared across donors would
+# let a marker object match another donor's islet.
+img_donor <- geom %>% distinct(ImageID, folder_id) %>% count(ImageID) %>% filter(n > 1)
+cat("\nImageIDs appearing under more than one donor folder:", nrow(img_donor),
+    "(must be 0)\n")
+if (nrow(img_donor) > 0) print(head(img_donor, 20))
+
+if (length(QUAD_STAINED_IMAGES) > 0) {
+  present <- intersect(QUAD_STAINED_IMAGES, unique(geom$ImageID))
+  cat("operator-flagged quad-stained images present:", length(present), "/",
+      length(QUAD_STAINED_IMAGES), "\n")
+  if (length(present) > 0) {
+    cat("  excluding:", paste(present, collapse = ", "), "\n")
+    phenotyper_islets <- phenotyper_islets %>% filter(!ImageID %in% present)
+  }
+}
+
+rm(phenotyper_geometry, geom, no_cutoff_data); invisible(gc())
+```
+
+# Step 2: build one marker dataset
+
+```{r build-function}
+# Pull the marker classifier's own columns and collapse the name variants.
+extract_marker_counts <- function(raw, label) {
+  if (!"Total.Cells" %in% names(raw)) {
+    stop(label, ": no Total.Cells column in the marker export")
+  }
+  # v8 hard-coded `Tissue.Area..um.2.`, which is a latent hard failure:
+  # read.csv() pushes "Tissue Area (um^2)" through make.names(), and whether
+  # the micro sign survives as "um", ".m" or something else depends on the
+  # file encoding and the locale. Match it instead.
+  tissue_col <- grep("^Tissue\\.Area", names(raw), value = TRUE)
+  if (length(tissue_col) == 0) {
+    cat(sprintf("  NOTE: no Tissue.Area column found in %s - tissue_area_um_2 will be NA\n",
+                label))
+    raw$.tissue_area <- NA_real_
+  } else {
+    if (length(tissue_col) > 1) {
+      cat("  NOTE: several Tissue.Area columns, using", tissue_col[1], "\n")
+    }
+    raw$.tissue_area <- suppressWarnings(as.numeric(raw[[tissue_col[1]]]))
+  }
+
+  pre <- raw %>%
+    mutate(marker_uid = paste(ImageID, XMin, XMax, YMin, YMax, sep = "_")) %>%
+    dplyr::select(
+      ImageID, marker_uid, XMin, XMax, YMin, YMax,
+      total_cells_raw  = Total.Cells,
+      tissue_area_um_2 = .tissue_area,
+      matches(MARKER_COL_PATTERN, ignore.case = TRUE)
+    )
+
+  fixed <- c("ImageID", "marker_uid", "XMin", "XMax", "YMin", "YMax",
+             "total_cells_raw", "tissue_area_um_2")
+  matched <- setdiff(names(pre), fixed)
+  cat(sprintf("  classifier columns matched by MARKER_COL_PATTERN: %d\n",
+              length(matched)))
+  if (length(matched) == 0) {
+    stop(label, ": MARKER_COL_PATTERN matched no columns - the classifier ",
+         "naming has changed. Available columns:\n  ",
+         paste(head(names(raw), 40), collapse = ", "))
+  }
+  print(matched)
+
+  out <- pre %>%
+    transmute(
+      ImageID, marker_uid, XMin, XMax, YMin, YMax,
+      total_cells_raw, tissue_area_um_2,
+      insulin_cells         = coalesce_by_pattern(pre, "Insulin[^A-Za-z]*Cells$"),
+      glucagon_cells        = coalesce_by_pattern(pre, "Glucagon[^A-Za-z]*Cells$"),
+      acinar_cells          = coalesce_by_pattern(pre, "Acinar[^A-Za-z]*Cells$"),
+      pct_insulin_positive  = coalesce_by_pattern(pre, "Insulin[^A-Za-z]*Positive[^A-Za-z]*Cells$"),
+      pct_glucagon_positive = coalesce_by_pattern(pre, "Glucagon[^A-Za-z]*Positive[^A-Za-z]*Cells$"),
+      pct_acinar_positive   = coalesce_by_pattern(pre, "Acinar[^A-Za-z]*Positive[^A-Za-z]*Cells$")
+    )
+
+  # A component that is almost entirely NA means the regex matched nothing
+  # useful, not that the marker is sparse. That failure mode silently turned
+  # every hormone-composition column into NA in an earlier version, so it is a
+  # hard stop rather than a warning.
+  comps <- c("insulin_cells", "glucagon_cells", "acinar_cells")
+  na_rate <- vapply(comps, function(cc) mean(is.na(out[[cc]])), numeric(1))
+  cat("  NA rate per component: ",
+      paste(sprintf("%s=%.1f%%", names(na_rate), 100 * na_rate),
+            collapse = ", "), "\n")
+  if (any(na_rate > 0.5)) {
+    stop(label, ": ", paste(names(na_rate)[na_rate > 0.5], collapse = ", "),
+         " more than 50% missing - name matching has failed, not sparse data.")
+  }
+
+  all_na <- is.na(out$insulin_cells) & is.na(out$glucagon_cells) &
+    is.na(out$acinar_cells)
+  cat(sprintf("  rows missing all three components: %d (%.2f%%) - dropped\n",
+              sum(all_na), 100 * mean(all_na)))
+
+  out %>%
+    filter(!all_na) %>%
+    mutate(
+      across(all_of(comps), ~ coalesce(.x, 0)),
+      # total_cells is this sum, NOT Total.Cells - operator instruction to
+      # ignore Total.Cells/Hema regardless of classifier settings.
+      total_cells      = insulin_cells + glucagon_cells + acinar_cells,
+      # Endocrine-only variant, for the sensitivity analysis on whether
+      # marker+ acinar cells belong in the outcome. Defensible for CD3/CD45
+      # (peri-islet infiltration is part of insulitis); for Ki-67 it mixes
+      # endocrine and exocrine proliferation, which differ in baseline rate.
+      total_cells_endo = insulin_cells + glucagon_cells
+    )
+}
+
+build_marker_dataset <- function(label, path) {
+  cat(sprintf("\n%s\n=== %s ===\n", strrep("=", 70), label))
+
+  # ---- read ---------------------------------------------------------------
+  raw <- read_halo_folder(path, label)
+  cat(sprintf("  raw rows: %d, donors: %d, images: %d\n", nrow(raw),
+              dplyr::n_distinct(raw$folder_id), dplyr::n_distinct(raw$ImageID)))
+
+  # ---- marker counts ------------------------------------------------------
+  mk <- extract_marker_counts(raw, label)
+  if (any(duplicated(mk$marker_uid))) {
+    n_dup <- sum(duplicated(mk$marker_uid))
+    cat(sprintf("  WARNING: %d duplicate marker bounding boxes - keeping first\n",
+                n_dup))
+    mk <- mk[!duplicated(mk$marker_uid), , drop = FALSE]
+  }
+  rm(raw); invisible(gc())
+
+  # ---- spatial match ------------------------------------------------------
+  imgs <- intersect(unique(mk$ImageID), unique(phenotyper_islets$ImageID))
+  cat(sprintf("  images present in both marker and phenotyper data: %d\n",
+              length(imgs)))
+  matches <- map_dfr(imgs, function(img) {
+    d1 <- mk[mk$ImageID == img, , drop = FALSE]
+    d2 <- phenotyper_islets[phenotyper_islets$ImageID == img, , drop = FALSE]
+    if (nrow(d1) == 0 || nrow(d2) == 0) return(NULL)
+    match_one_image(d1, d2)
+  })
+  cat(sprintf("  raw matches: %d\n", nrow(matches)))
+
+  # True matches are both spatially close and similar in size.
+  matches <- matches %>%
+    filter(dist_px <= MATCH_MAX_DIST, area_ratio >= MATCH_MIN_AREA)
+  cat(sprintf("  matches kept (dist <= %d, area ratio >= %.2f): %d (%.1f%% of marker objects)\n",
+              MATCH_MAX_DIST, MATCH_MIN_AREA, nrow(matches),
+              100 * nrow(matches) / max(nrow(mk), 1)))
+  cat("  distance distribution of kept matches:\n")
+  print(summary(matches$dist_px))
+
+  # ---- assemble -----------------------------------------------------------
+  # One row per matched physical islet, and it stays that way: the marker
+  # values attach to the single canonical phenotyper row, not to every
+  # classifier run of it.
+  df <- matches %>%
+    left_join(mk, by = "marker_uid", relationship = "one-to-one") %>%
+    left_join(
+      phenotyper_islets %>%
+        dplyr::select(islet_uid, source_file, Object.Id, ImageID_ph = ImageID,
+                      ph_XMin = XMin, ph_XMax = XMax,
+                      ph_YMin = YMin, ph_YMax = YMax),
+      by = "islet_uid", relationship = "one-to-one"
+    ) %>%
+    # relationship = "many-to-one" makes a silent row multiplication
+    # impossible: dplyr errors instead of quietly duplicating.
+    left_join(demo, by = c("source_file", "Object.Id"),
+              relationship = "many-to-one")
+
+  stopifnot(nrow(df) == nrow(matches))
+
+  # ---- filters ------------------------------------------------------------
+  cat("  attrition:\n")
+  df <- df %>%
+    filter_log(!is.na(Diagnosis),
+               "matched to a real islet with demographics") %>%
+    filter_log(log_Islet.Cells <= LOG_ISLET_MAX,
+               "log_Islet.Cells <= LOG_ISLET_MAX") %>%
+    # Lower size bound, absent from v8. The count pipeline applies
+    # Islet.Cells >= 15 for full_data and treats 2-14 endocrine cells as a
+    # separate small-cluster class, so v8's marker datasets were the only place
+    # pooling scattered single endocrine cells with real islets. Those objects
+    # are where the outcome is structurally near-zero, and they dominated both
+    # the row count and the leverage on the islet-size slope.
+    filter_log(Islet.Cells >= MIN_ISLET_CELLS,
+               "Islet.Cells >= MIN_ISLET_CELLS") %>%
+    # Marker+ count cannot exceed the object's cell count. The denominator has
+    # to include acinar cells because the numerator does - see the header note.
+    filter_log(total_cells <= Islet.Cells + Count.Acinar,
+               "total_cells <= Islet.Cells + Count.Acinar")
+
+  # ---- consistency and completeness --------------------------------------
+  # The demographics join keys on (source_file, Object.Id) and never mentions
+  # the image, so confirm the three independent ImageID sources agree.
+  stopifnot(all(df$ImageID == df$ImageID_ph),
+            all(df$ImageID == df$ImageID_ncd))
+
+  na_demo <- vapply(c("Region", "Sex", "Age", "Islet.Cells", "log_Islet.Cells",
+                      "Count.Acinar"),
+                    function(v) sum(is.na(df[[v]])), integer(1))
+  if (any(na_demo > 0)) {
+    cat("  WARNING: NA demographics after the join (expected 0):\n")
+    print(na_demo[na_demo > 0])
+  }
+
+  # ---- centring -----------------------------------------------------------
+  # After every filter, so the means are those of the islets that actually end
+  # up in the dataset.
+  df <- df %>%
+    mutate(Age_c             = Age - mean(Age, na.rm = TRUE),
+           log_Islet.Cells_c = log_Islet.Cells -
+                               mean(log_Islet.Cells, na.rm = TRUE)) %>%
+    dplyr::select(
+      Donor, ImageID, source_file, Object.Id, islet_uid, marker_uid,
+      Region, Sex, Age, Age_c, AgeCat, Diagnosis, Disease.Duration, age_at_onset,
+      Stain, Islet.Cells, log_Islet.Cells, log_Islet.Cells_c,
+      Count.ins, Count.glu, Count.Acinar,
+      total_cells, total_cells_endo, total_cells_raw,
+      insulin_cells, glucagon_cells, acinar_cells,
+      pct_insulin_positive, pct_glucagon_positive, pct_acinar_positive,
+      tissue_area_um_2, dist_px, area_ratio,
+      ph_XMin, ph_XMax, ph_YMin, ph_YMax
+    )
+
+  if (nrow(df) == 0) stop(label, ": no rows survived the filters")
+  df
+}
+```
+
+# Step 3: build all three
+
+```{r build-all}
+marker_data <- list()
+for (tag in names(MARKER_PATHS)) {
+  marker_data[[tag]] <- build_marker_dataset(tag, MARKER_PATHS[[tag]])
+}
+```
+
+# Step 4: diagnostics
+
+```{r diagnostics}
+marker_diagnostics <- function(df, label) {
+  cat(sprintf("\n%s\n=== %s: diagnostics ===\n", strrep("=", 70), label))
+
+  cat("\n-- replication structure --\n")
+  cat(sprintf("  rows %d, physical islets %d, rows per islet %.4f (must be 1.0000)\n",
+              nrow(df), dplyr::n_distinct(df$islet_uid),
+              nrow(df) / max(dplyr::n_distinct(df$islet_uid), 1)))
+  cat("  classifier run retained:\n")
+  print(table(df$Stain, useNA = "ifany"))
+
+  cat("\n-- islet size --\n")
+  print(summary(df$Islet.Cells))
+  cat(sprintf("  below 15 endocrine cells: %d (must be 0)\n",
+              sum(df$Islet.Cells < MIN_ISLET_CELLS)))
+
+  cat("\n-- outcome --\n")
+  cat(sprintf("  total_cells      mean %.3f, zeros %.1f%%, max %d\n",
+              mean(df$total_cells), 100 * mean(df$total_cells == 0),
+              as.integer(max(df$total_cells))))
+  cat(sprintf("  total_cells_endo mean %.3f, zeros %.1f%%, max %d\n",
+              mean(df$total_cells_endo), 100 * mean(df$total_cells_endo == 0),
+              as.integer(max(df$total_cells_endo))))
+
+  cat("\n-- total_cells vs total_cells_raw, per donor --\n")
+  cat("  The v8 expectation was 'most donors ~0 difference'. Pooled means were\n")
+  cat("  0.29 vs 0.57 (Ki-67) and 0.17 vs 0.57 (CD3) - a 49% and 70% gap, with\n")
+  cat("  both markers landing on an identical 0.57. Largest 10 gaps:\n")
+  per_donor <- df %>%
+    group_by(Donor) %>%
+    summarise(n = n(),
+              mean_tc  = mean(total_cells),
+              mean_raw = mean(total_cells_raw, na.rm = TRUE),
+              gap      = mean_raw - mean_tc,
+              .groups  = "drop") %>%
+    arrange(desc(abs(gap)))
+  print(as.data.frame(head(per_donor, 10)), digits = 3)
+  cat(sprintf("  donors with |gap| < 0.01: %d / %d\n",
+              sum(abs(per_donor$gap) < 0.01, na.rm = TRUE), nrow(per_donor)))
+  # If total_cells_raw still tracks the phenotyper's own cell count, the
+  # column collision the v7 notes describe is not actually resolved.
+  cat(sprintf("  cor(total_cells_raw, Islet.Cells) = %.3f (near 1 => still leaking)\n",
+              suppressWarnings(cor(df$total_cells_raw, df$Islet.Cells,
+                                   use = "complete.obs"))))
+  cat(sprintf("  cor(total_cells,     Islet.Cells) = %.3f\n",
+              suppressWarnings(cor(df$total_cells, df$Islet.Cells,
+                                   use = "complete.obs"))))
+
+  cat("\n-- ceiling filter: v8 denominator vs corrected --\n")
+  cat(sprintf("  would fail v8 (<= Islet.Cells):                %d (%.2f%%)\n",
+              sum(df$total_cells > df$Islet.Cells),
+              100 * mean(df$total_cells > df$Islet.Cells)))
+  cat(sprintf("  fails corrected (<= Islet.Cells + Count.Acinar): %d (must be 0)\n",
+              sum(df$total_cells > df$Islet.Cells + df$Count.Acinar)))
+  cat("  The gap is legitimate rows v8 discarded for carrying acinar signal.\n")
+
+  cat("\n-- design --\n")
+  cat(sprintf("  %d donors (ND=%d, T1D=%d), %d images\n",
+              dplyr::n_distinct(df$Donor),
+              dplyr::n_distinct(df$Donor[df$Diagnosis == "ND"]),
+              dplyr::n_distinct(df$Donor[df$Diagnosis == "T1D"]),
+              dplyr::n_distinct(df$ImageID)))
+  cat("  donor-level Sex x Diagnosis:\n")
+  print(table(distinct(df, Donor, Diagnosis, Sex)[c("Diagnosis", "Sex")]))
+  cat("  images per region:\n")
+  print(table(distinct(df, ImageID, Region)$Region))
+
+  invisible(per_donor)
+}
+
+for (tag in names(marker_data)) marker_diagnostics(marker_data[[tag]], tag)
+```
+
+# Step 5: save
+
+```{r save}
+# T1D subsets are re-centred on the T1D islets, so their Age_c /
+# log_Islet.Cells_c are not comparable with the full datasets' - intended, but
+# worth remembering when comparing coefficients across the two model families.
+#
+# Duration models use Disease.Duration_c + age_at_onset_c and never Age_c:
+# current age = age at onset + disease duration, so all three together are
+# rank-deficient.
+make_t1d <- function(df) {
+  df %>%
+    filter(Diagnosis == "T1D") %>%
+    mutate(
+      Age_c              = Age - mean(Age, na.rm = TRUE),
+      log_Islet.Cells_c  = log_Islet.Cells - mean(log_Islet.Cells, na.rm = TRUE),
+      Disease.Duration_c = Disease.Duration - mean(Disease.Duration, na.rm = TRUE),
+      age_at_onset       = Age - Disease.Duration,
+      age_at_onset_c     = age_at_onset - mean(age_at_onset, na.rm = TRUE)
+    )
+}
+
+for (tag in names(marker_data)) {
+  df  <- marker_data[[tag]]
+  t1d <- make_t1d(df)
+
+  write_csv(df,  sprintf("Data/%s_data.csv", tag))
+  saveRDS(df,    sprintf("Data/%s_data.rds", tag))
+  write_csv(t1d, sprintf("Data/%s_data_t1d.csv", tag))
+  saveRDS(t1d,   sprintf("Data/%s_data_t1d.rds", tag))
+
+  cat(sprintf("%-5s  %7d rows / %3d donors / %4d images   t1d: %7d rows / %3d donors\n",
+              tag, nrow(df), dplyr::n_distinct(df$Donor),
+              dplyr::n_distinct(df$ImageID),
+              nrow(t1d), dplyr::n_distinct(t1d$Donor)))
+}
+```
+
+```{r handoff-check}
+# marker_count_models_v4.Rmd checks for exactly these columns and stops if any
+# are absent, so verify here rather than discovering it there.
+REQUIRED_BY_MODELS <- c("total_cells", "total_cells_endo", "total_cells_raw",
+                        "Islet.Cells", "Count.Acinar", "Stain", "islet_uid",
+                        "log_Islet.Cells", "log_Islet.Cells_c",
+                        "Donor", "ImageID", "Region", "Sex", "Age", "Diagnosis")
+REQUIRED_T1D <- c(REQUIRED_BY_MODELS, "Disease.Duration_c", "age_at_onset_c")
+
+ok <- TRUE
+for (tag in names(marker_data)) {
+  for (suffix in c("", "_t1d")) {
+    f <- sprintf("Data/%s_data%s.csv", tag, suffix)
+    need <- if (suffix == "") REQUIRED_BY_MODELS else REQUIRED_T1D
+    nms <- names(readr::read_csv(f, n_max = 0, show_col_types = FALSE))
+    miss <- setdiff(need, nms)
+    cat(sprintf("%-26s %s\n", basename(f),
+                if (length(miss) == 0) "OK" else
+                  paste("MISSING:", paste(miss, collapse = ", "))))
+    if (length(miss) > 0) ok <- FALSE
+  }
+}
+if (!ok) stop("output is missing columns marker_count_models_v4.Rmd requires")
+cat("\nNext: marker_count_models_v4.Rmd\n")
+```
+
+```{r session-info}
+sessionInfo()
+```

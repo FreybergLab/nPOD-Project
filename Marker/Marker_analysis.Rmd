@@ -1,0 +1,173 @@
+---
+title: "Marker analysis — Ki-67 and CD3 per-cell rates"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(glmmTMB)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+Six per-cell rate models: Ki-67 and CD3, each decomposed into the insulin,
+glucagon and acinar bins. Each is a negative binomial mixed model with
+`offset(log(count of the relevant cell type))`, so coefficients are rate ratios
+**per cell of that type** rather than counts per islet.
+
+Companion question: total endocrine cellularity per islet is preserved in T1D
+despite near-complete beta-cell loss. These models ask whether proliferation
+explains it; the selection test at the end asks whether survivor bias does.
+
+## What is trustworthy, and what is not
+
+**Verified** — computed from `fixef()` and `vcov()` or straight from the data,
+and cross-checked against observed rates:
+
+- the composition and denominator table
+- the marginal Diagnosis effects from `marker_effects.R`
+- the donor-level points and violins in every plot
+- the survivor-selection test, which uses only `ratio_data` and `density_data`
+
+- the Excel workbooks, which no longer use emmeans at all
+
+`generate_marker_excel.R` has been rebuilt. Every marginal rate, group
+difference and age slope is now an exact linear contrast of the fixed effects —
+`estimate = l'beta`, `SE = sqrt(l' V l)` — so no transformations are composed
+and each number can be checked by hand from the coefficient table. It refuses
+to write any file until `validate_marker_rates()` passes.
+
+The previous version routed those blocks through
+`emmeans` → `regrid(transform = "log")` → `contrast(type = "response")` and
+returned 4.64–4.99% for all six outcomes, including 4.70% for Ki-67 in alpha
+cells where the observed rate is 0.62%. If you have workbooks from before this
+rewrite, delete them.
+
+**Still outstanding** — the stars on the Region, Sex and interaction panels of
+the all-comparisons plots, which are suppressed by `SHOW_UNVERIFIED_STARS`; and
+the count (abundance) workbooks, which need the same treatment applied to the
+count formula.
+
+```{r flags}
+RUN_EXCEL <- TRUE    # rebuilt on exact linear contrasts; self-validating
+RUN_PLOTS <- TRUE    # donor-level panels; see the note in that chunk
+```
+
+# 1. Preflight
+
+```{r preflight}
+source("Marker/R/marker_common.R")
+source("Marker/R/marker_effects.R")
+marker_preflight()
+```
+
+# 2. Data and denominators
+
+```{r load}
+# Single-stain runs are excluded: they detect insulin only, so Count.glu is
+# structurally zero. Matches the exclusion already applied to ratio_data.
+raw <- load_marker_data()
+for (tag in names(raw)) {
+  d <- raw[[tag]]
+  cat(sprintf("%-5s %7d islets, %2d donors (ND %d / T1D %d)\n", tag, nrow(d),
+              dplyr::n_distinct(d$Donor),
+              dplyr::n_distinct(d$Donor[d$Diagnosis == "ND"]),
+              dplyr::n_distinct(d$Donor[d$Diagnosis == "T1D"])))
+}
+```
+
+```{r denominators}
+# The numbers every rate is built on, and the paper's central observation:
+# beta cells fall by about 31 per islet while alpha cells rise by about 33,
+# leaving total cellularity per islet unchanged.
+bind_rows(lapply(names(raw), function(tag) raw[[tag]] %>% mutate(marker = tag))) %>%
+  group_by(marker, Diagnosis) %>%
+  summarise(islets = n(), donors = dplyr::n_distinct(Donor),
+            Islet.Cells = mean(Islet.Cells),
+            Count.ins = mean(Count.ins), Count.glu = mean(Count.glu),
+            Count.Acinar = mean(Count.Acinar), .groups = "drop") %>%
+  as.data.frame() %>% print(digits = 4)
+```
+
+# 3. Marginal effects, with the validation gate
+
+```{r effects}
+# Exact linear contrast on the coefficients: the T1D-vs-ND log rate ratio
+# averaged with equal weights over the three regions and two sexes. No emmeans.
+effects <- marker_effects_table()
+
+# Hard stop if any model-derived ratio disagrees with the crude ratio by more
+# than 3x. This is the check that would have caught the emmeans failure before
+# it reached a figure.
+validate_marker_rates(effects)
+```
+
+```{r effects-report}
+cat("\n=== FIGURE AND LEGEND NUMBERS ===\n")
+cat("Quote obs_ND / obs_T1D as the descriptive percentages — they are what the\n")
+cat("figure's points show and need no back-transformation. Quote ratio, lwr,\n")
+cat("upr and p from the model. Stars come from the sig column.\n\n")
+print(as.data.frame(effects %>%
+  dplyr::select(marker, cell, obs_ND, obs_T1D, ratio, lwr, upr, pct_change,
+                p, sig, n_ND, n_T1D)), digits = 4)
+
+cat("\n=== zero-inflation (reported separately, not in the CI above) ===\n\n")
+print(as.data.frame(effects %>%
+  dplyr::select(marker, cell, family, zi_ND, zi_T1D, zi_scale,
+                marginal_ratio)), digits = 4)
+
+dir.create("Marker/Results", showWarnings = FALSE, recursive = TRUE)
+readr::write_csv(effects, "Marker/Results/marker_effects.csv")
+cat("\nSaved Marker/Results/marker_effects.csv\n")
+```
+
+# 4. Survivor-selection test
+
+```{r selection}
+# Independent of everything above: uses only ratio_data and density_data from
+# the count pipeline. Falsifies pure survivor selection — alpha cells per mm2
+# of tissue more than double, and selection can only remove cells.
+source("Marker/R/plot_selection_figures.R")
+sel_data <- prepare_selection_data()
+sel_main <- generate_selection_main(sel_data)
+sel_supp <- generate_selection_supp(sel_data)
+```
+
+# 5. Plots
+
+```{r plots, eval = RUN_PLOTS}
+# Donor-level violins and points are computed directly from the data and are
+# correct. The STARS on the Region, Sex and interaction panels still come from
+# the emmeans path and should not be reported until that is fixed. The
+# Diagnosis panel stars should be checked against the sig column in section 3.
+source("Marker/R/plot_marker_main_figure.R")
+main <- generate_marker_main_figure()
+
+source("Marker/R/plot_marker_all_comparisons.R")
+generate_all_marker_plots()
+```
+
+# 6. Excel workbooks
+
+```{r excel, eval = RUN_EXCEL}
+# Validates all six Diagnosis contrasts against the observed rates and stops
+# before writing if any disagree. On the Diagnosis sheet, rate_population
+# should land near rate_observed and rate_median_donor should sit below both —
+# the gap is the random-effect Jensen factor, reported on the Model Summary
+# sheet.
+source("Marker/R/generate_marker_excel.R")
+generate_all_marker_excel()
+```
+
+```{r}
+source("Marker/R/marker_sensitivity.R")
+run_marker_sensitivity()      # both sensitivities on the four figure panels
+marker_descriptives()         # the fold-change numbers you asked about
+```
+
+
+```{r session-info}
+sessionInfo()
+```

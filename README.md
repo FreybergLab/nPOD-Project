@@ -14,14 +14,16 @@ nPOD-Project/
 ├── Create_marker_datasets_v1.Rmd   Step 2: build Ki-67 / CD3 / CD45 datasets
 ├── all_npod_models_v4.Rmd          Step 3: density, count and area models (glmmTMB)
 ├── HTC Models/                     Step 4: composition and β/(α+β) models (brms, cluster)
-├── Marker/                         Step 5: Ki-67 and CD3 rate models
+│                                   Step 8: composition sensitivity refits (cluster)
+├── Marker/                         Step 5: Ki-67 and CD3 rate models, workbooks and Supplementary Figure 16
 ├── Density/  Proportion/  Count/  Ratio/  Area/
 │                                   Step 6: result workbooks and figures for each analysis
 ├── summary_dot_map_v3.Rmd          Supplementary Figure 23 (results summary)
 ├── Demo_table.Rmd                  Table 1
 ├── colors_master.R                 Shared plotting palette
+├── Threshold/                      Supplementary Figure 4 (the 15-cell islet threshold)
 ├── Pseudotime/                     [TO ADD] UMAP and pseudotime analysis
-├── Sensitivity/                    [TO ADD] sensitivity analyses
+├── Sensitivity/                    Step 8: data checks and sensitivity analyses (Supplementary Table 4)
 └── Results/                        Model-output workbooks behind Supplementary Table 2
 ```
 
@@ -29,9 +31,7 @@ Each analysis folder (`Density/`, `Proportion/`, `Count/`, `Ratio/`, `Area/`) ha
 
 ## Data
 
-**Raw inputs (not included; too large for GitHub).** These are the HALO per-object and summary exports for three analyses: the phenotyper (cell counts per object), area quantification, and the Ki-67, CD3 and CD45 marker analyses. The tissue comes from nPOD and HPAP. 
-
-Data is available at this link: DOI:10.5281/zenodo.23423201
+**Raw inputs (not included; too large for GitHub).** These are the HALO per-object and summary exports for three analyses: the phenotyper (cell counts per object), area quantification, and the Ki-67, CD3 and CD45 marker analyses. The tissue comes from nPOD and HPAP. The exports are available from Zenodo: [doi:10.5281/zenodo.23423201](https://doi.org/10.5281/zenodo.23423201).
 
 Set the raw-data locations before running:
 
@@ -41,9 +41,9 @@ Set the raw-data locations before running:
 | `area_base_path` | `Create_count_datasets_v1.Rmd` | Area-quantification exports |
 | Ki-67, CD3 and CD45 paths | `Create_marker_datasets_v1.Rmd` (top of file) | Marker exports |
 
-**Metadata inputs.** Place these in the repository root. **[TO ADD to the repository, if nPOD data-use terms allow.]**
+**Metadata inputs.** These go in the repository root. All are included except the donor clinical metadata.
 
-- `01282025_Full.nPOD.csv`: donor clinical metadata
+- `01282025_Full.nPOD.csv`: donor clinical metadata **[TO ADD to the repository, if nPOD data-use terms allow.]**
 - `remove_list.xlsx`: objects excluded after manual image QC
 - `No_stain_data_stain_added.xlsx`: stain assignments for images whose exports lacked them
 - `Supplemental_Table_1.xlsx`: Supplemental Table 1, read by `Demo_table.Rmd`
@@ -93,6 +93,17 @@ for (d in c("Data", "Density/Models", "Count/Models",
 
 **Step 3: fit the local models.** Knit `all_npod_models_v4.Rmd`. It fits the islet density models (Gamma), the cell-count models (negative binomial) and the hormone-positive area models (Gaussian on log area), saving them to `Density/Models/`, `Count/Models/` and `Area/Models/`.
 
+If glmmTMB has been updated since the models were saved, functions that re-evaluate a saved model fail, for example with `Error when reading the variable: 'combinom_disp_Link'`. Bring the saved models up to date once, without refitting:
+
+```r
+files <- list.files(c("Area/Models", "Count/Models", "Density/Models", "Marker_Rate_Models"),
+                    pattern = "\\.rds$", recursive = TRUE, full.names = TRUE)
+for (f in files) {
+  m <- readRDS(f)
+  if (inherits(m, "glmmTMB")) saveRDS(glmmTMB::up2date(m), f)
+}
+```
+
 **Step 4: fit the Bayesian models on a cluster.** Copy `Data/quad_data.csv`, `Data/quad_data.rds` and `Data/cutoff_data.rds` into a `Data/` folder on the cluster, then run the scripts in `HTC Models/`. Every model is a cmdstanr fit with 4 chains of 2,000 iterations (1,000 warm-up), 4 threads per chain and seed 123. The published runs used 16 cores and 64 GB per job, and each fit can take many hours. Copy the resulting `.rds` files back as listed:
 
 | Script | Models | Copy to |
@@ -105,6 +116,8 @@ for (d in c("Data", "Density/Models", "Count/Models",
 
 All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files to the working directory; the others write to `Models/`.
 
+**Reference point for the T1D models.** The T1D composition and β/(α+β) models are fitted to T1D objects whose covariates were centred on the ND + T1D data, so their zero is not the T1D average. The T1D result workbooks and figures therefore report slopes and contrasts at the T1D averages of each model's data: disease duration 4.6 years and age at onset 15.4 years for composition, and 5.6 and 16.7 years for β/(α+β). The glmmTMB T1D models are fitted to data centred on T1D donors, so they need no adjustment.
+
 **Step 5: run the Ki-67 and CD3 analyses** (`Marker/`).
 
 | File | What it does |
@@ -112,39 +125,52 @@ All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files 
 | `rate_models.Rmd` | Fits the per-cell rate models (negative binomial with a log cell-count offset); saves them and `rate_results.rds` to `Marker_Rate_Models/` |
 | `rate_units.Rmd` | Tabulates rate-model effects (`rate_models_effects.csv`, `rate_models_units.csv`) |
 | `survivor_selection_test.Rmd` | Tests whether survivor selection could explain the T1D composition (`selection_burden_per_donor.csv`, `selection_density_inequality.csv`) |
-| `Marker_analysis.Rmd` and `R/` | **[TO ADD]** Result workbooks and Supplementary Figure 16 |
+| `Marker_analysis.Rmd` and `R/` | Loads the rate models, checks every model-derived rate against the observed rate, and writes `Results/marker_effects.csv`, the rate workbooks (`Results/Rate/`), the sensitivity table (`Results/marker_sensitivity.csv`) and Supplementary Figure 16 (`Graphs/marker_main_figure`) |
+
+Earlier per-islet count (abundance) models were superseded by these rate models and are not used in the paper, so their code and workbooks are not included.
 
 **Step 6: generate the result workbooks and figures.** Knit each file below. They write workbooks to `<folder>/Results/` and figures to `<folder>/Graphs/`.
 
 | File | Produces |
 |---|---|
 | `Density/Density_analysis.Rmd` | Figure 2; Supplementary Figure 5 |
-| `Proportion/Proportion_analysis.Rmd` | Figures 3–6 and 7E; Supplementary Figures 6–9 and 11–15 |
-| `Count/Count_analysis.Rmd` | Figure 7A–D |
-| `Ratio/Ratio_analysis.Rmd` | Supplementary Figure 10 |
+| `Proportion/Proportion_analysis.Rmd` | Supplementary Figures 6–9 and 11–15; the model panels of Figures 3–6 (`generate_main_3way_figures()`) |
+| `Count/Count_analysis.Rmd` | Cell-count result workbooks |
+| `Ratio/Ratio_analysis.Rmd` | Ratio result workbooks. For Supplementary Figure 10, then run `generate_supplementary_figure_S10()` (in `Ratio/R/plot_ratio_all_comparisons.R`) |
 | `Area/total_area_analysis.Rmd` | Figure 8; Supplementary Figure 18 |
 | `Area/per_cell_area_analysis.Rmd` | Supplementary Figures 17 and 19 |
-| `summary_dot_map_v3.Rmd` | Supplementary Figure 23 |
+| `Threshold/R/plot_size_threshold_figure.R` | Supplementary Figure 4: source the file, then run `generate_size_threshold_figure(readRDS("Data/no_cutoff_data.rds"))` |
+| `summary_dot_map_v3.Rmd` | Supplementary Figure 23 and its data, `model_summary_long_v3.csv` |
 | `Demo_table.Rmd` | Table 1 |
 
 `Area/R/fit_count_adj_models.R` fits the count-adjusted area models, whose outputs are in `Results/Total Area AdjCount/`.
 
+The area analyses save about 180 plots per cell type, and a single R session can run out of file handles ("Too many open files"). Each cell type saves the data for the published figures as it finishes, so the cell types can be run in separate sessions; the published figures are then drawn by `Area/R/plot_area_figures.R`.
+
 **Step 7: pseudotime.** **[TO ADD]** UMAP and pseudotime code for Figure 9 and Supplementary Figures 20–22.
 
-**Step 8: sensitivity analyses.** **[TO ADD]**
+**Step 8: sensitivity analyses** (Supplementary Table 4).
+
+| File | What it does |
+|---|---|
+| `Sensitivity/sensitivity_local.R` | Runs locally. Data checks, then the islet-density, cells-per-islet and single-cell-area sensitivity analyses; stops unless its baseline refits reproduce the published values. Writes its tables to `Sensitivity/`. |
+| `HTC Models/sensitivity_composition_HTC.R` | Composition refits on the cluster, one variant per job. Run `sensitivity_check.sbatch` once, then `sensitivity_array.sbatch`, then `Rscript sensitivity_composition_HTC.R summarize`, and copy `Sensitivity/composition_sensitivity.csv` back. |
+| `Marker/R/marker_sensitivity.R` | Ki-67 and CD3 sensitivity refits, run by `Marker_analysis.Rmd` |
 
 ## Figures not produced by code in this repository
 
 - **Figure 1** is a schematic.
 - **Supplementary Figure 1** shows annotated images.
 - **Supplementary Figures 2–3** (classifier validation) were made in GraphPad Prism 10.4.0 from manual versus AI cell counts.
-- **Supplementary Figure 4** (endocrine-object size distribution and thresholds).
+- **Figures 3–6** (heatmap and density-curve panels) and **Figure 7** **[TO ADD]** were made with code not yet in this repository.
+- **Figure 9 and Supplementary Figures 20–22:** see Step 7.
 
 ## Results folder
 
-`Results/` contains the model-output workbooks that Supplementary Table 2 is built from, organized by analysis: density, cell-type proportions and counts, the β/(α+β) ratio, total and per-cell area, and the Ki-67 and CD3 rates.
+`Results/` contains the model-output workbooks that Supplementary Table 2 is built from, organized by analysis: density, cell-type proportions and counts, the β/(α+β) ratio, and total and per-cell area. The Ki-67 and CD3 rate workbooks are in `Marker/Results/Rate/`.
 
 ## Citation, license and contact
 
 - **Citation:** https://www.biorxiv.org/content/10.64898/2026.06.05.730081v1
+- **License:** **[TO ADD]**
 - **Contact:** freyberg@pitt.edu

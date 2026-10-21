@@ -90,7 +90,7 @@ plot_reclassification_sensitivity <- function() {
   labs_df <- filter(sens, islet_size <= S4_CUTOFF) %>%
     mutate(label   = paste0(signif(pct_change, 2), "%"),
            left    = islet_size == 10,
-           label_x = islet_size + ifelse(left, -2, 2),
+           label_x = islet_size + ifelse(left, -3, 3),
            hjust   = ifelse(left, 1, 0))
   ggplot(sens, aes(x = islet_size, y = pct_change)) +
     geom_line(linewidth = 0.8, color = "grey30") +
@@ -100,7 +100,7 @@ plot_reclassification_sensitivity <- function() {
               aes(x = label_x, label = label, hjust = hjust, color = islet_size < S4_CUTOFF),
               size = 3.2, fontface = "bold") +
     scale_color_manual(values = c("TRUE" = s4_col_excluded, "FALSE" = s4_col_included), guide = "none") +
-    scale_x_continuous(breaks = sens$islet_size) +
+    scale_x_continuous(breaks = c(5, 15, 30, 50, 75, 100, 150)) +
     scale_y_continuous(labels = function(x) paste0(x, "%")) +
     labs(x = "Islet cell count", y = "Composition change\nfrom 1 cell reclassification",
          title = "Proportional sensitivity by islet size", tag = "C") +
@@ -134,7 +134,9 @@ generate_size_threshold_figure <- function(objects, save = TRUE, output_dir = "T
 
   if (save) {
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-    ggsave(file.path(output_dir, "Supplementary_Figure_S4.pdf"), fig, width = 12, height = 9)
+    # cairo_pdf: the default pdf() device cannot draw "\u2265" and prints "=" instead
+    ggsave(file.path(output_dir, "Supplementary_Figure_S4.pdf"), fig, width = 12, height = 9,
+           device = cairo_pdf)
     ggsave(file.path(output_dir, "Supplementary_Figure_S4.png"), fig, width = 12, height = 9, dpi = 300)
   }
 

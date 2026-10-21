@@ -116,6 +116,6 @@ print(t1d %>%
 ```
 
 ```{r}
-sessioinInfo()
+sessionInfo()
 ```
 

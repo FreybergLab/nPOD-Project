@@ -46,9 +46,11 @@ cells where the observed rate is 0.62%. If you have workbooks from before this
 rewrite, delete them.
 
 **Still outstanding** — the stars on the Region, Sex and interaction panels of
-the all-comparisons plots, which are suppressed by `SHOW_UNVERIFIED_STARS`; and
-the count (abundance) workbooks, which need the same treatment applied to the
-count formula.
+the all-comparisons plots, which are suppressed by `SHOW_UNVERIFIED_STARS`.
+
+The earlier per-islet count (abundance) models, from `marker_models_v6.Rmd`,
+were superseded by the rate models and are not used in the paper, so neither
+that file nor its workbooks are part of this repository.
 
 ```{r flags}
 RUN_EXCEL <- TRUE    # rebuilt on exact linear contrasts; self-validating

@@ -94,6 +94,10 @@ save_plot <- function(plt, filename, output_dir, width = 7, height = 5) {
 
 generate_area_diag_plots <- function(model, data, cell_label, area_col,
                                       has_islet, output_dir) {
+  # The data behind this function's published panel, returned for
+  # plot_area_figures.R. (Plots themselves are not kept: each one holds the
+  # function's environment, model included, and would exhaust memory.)
+  fig_data <- list()
   cat("    Generating diagnosis plots for", cell_label, "...\n")
 
   # Donor geometric means (matches model's log-scale estimates)
@@ -118,9 +122,9 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
     }
 
     plt <- ggplot() +
-      geom_violin(data = dm, aes(x = .data[[fac]], y = md, fill = .data[[fac]]),
+      geom_violin(data = dm, aes(x = .data[[!!fac]], y = md, fill = .data[[!!fac]]),
                   alpha = 0.3, color = NA, width = 0.7) +
-      geom_jitter(data = dm, aes(x = .data[[fac]], y = md, color = .data[[fac]]),
+      geom_jitter(data = dm, aes(x = .data[[!!fac]], y = md, color = .data[[!!fac]]),
                   width = 0.15, size = 1.5, alpha = 0.6) +
       scale_fill_manual(values = cols, guide = "none") +
       scale_color_manual(values = cols, guide = "none") +
@@ -131,6 +135,7 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
                              y = max(dm$md) * 0.95, label = sig_text,
                              size = if (fac == "Region") 4 else 8, lineheight = 0.9)
     save_plot(plt, paste0("main_", tolower(fac)), output_dir)
+    if (fac == "Diagnosis") fig_data$main_diagnosis <- list(points = dm, stars = sig_text)
   }
 
   # --- Two-way categorical (6 views) ---
@@ -151,9 +156,9 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
                                   adjust = "none", reverse = (fac == "Diagnosis")))
       n_c <- length(unique(data[[cond]]))
       plt <- ggplot() +
-        geom_violin(data = dm, aes(x = .data[[cond]], y = md, fill = .data[[fac]]),
+        geom_violin(data = dm, aes(x = .data[[!!cond]], y = md, fill = .data[[!!fac]]),
                     alpha = 0.25, color = NA, position = position_dodge(0.8), width = 0.7) +
-        geom_jitter(data = dm, aes(x = .data[[cond]], y = md, color = .data[[fac]], group = .data[[fac]]),
+        geom_jitter(data = dm, aes(x = .data[[!!cond]], y = md, color = .data[[!!fac]], group = .data[[!!fac]]),
                     position = position_jitterdodge(jitter.width = 0.12, dodge.width = 0.8), size = 1.2, alpha = 0.5) +
         scale_fill_manual(values = cols_f) + scale_color_manual(values = cols_f) +
         annotate("text", x = seq_len(n_c), y = max(dm$md) * seq(0.98, by = -0.05, length.out = n_c),
@@ -171,9 +176,9 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
       sig_labels <- left_join(all_c, sig_labels, by = cond) %>% mutate(label = replace_na(label, ""))
 
       plt <- ggplot() +
-        geom_violin(data = dm, aes(x = .data[[fac]], y = md, fill = .data[[fac]]),
+        geom_violin(data = dm, aes(x = .data[[!!fac]], y = md, fill = .data[[!!fac]]),
                     alpha = 0.3, color = NA, width = 0.7) +
-        geom_jitter(data = dm, aes(x = .data[[fac]], y = md, color = .data[[fac]]),
+        geom_jitter(data = dm, aes(x = .data[[!!fac]], y = md, color = .data[[!!fac]]),
                     width = 0.15, size = 1.2, alpha = 0.5) +
         facet_wrap(as.formula(paste("~", cond))) +
         geom_text(data = sig_labels, aes(x = 2, y = max(dm$md) * 0.95, label = label),
@@ -192,7 +197,7 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
                                           lab = "Islet size (log cells)", tag = "islet")
   for (cs in cont_specs) {
     cv <- cs$var; rv <- cs$raw; xl <- cs$lab; tag <- cs$tag
-    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]], na.rm = TRUE)
+    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]] - data[[cv]], na.rm = TRUE)  # model's zero: the plotted subsets are not re-centred
     cv_seq <- seq(ar[1] - mc, ar[2] - mc, length.out = 50)
     at_list <- setNames(list(cv_seq), cv)
     cat("      ", tag, "slopes...\n")
@@ -208,8 +213,8 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
       geom_line(data = e_ov, aes(x = x, y = response), linewidth = 0.9) +
       geom_point(data = dm, aes(x = x, y = md), alpha = 0.5, size = 1.8) +
       labs(x = xl, y = y_lab_area, title = paste(cell_label, "\u2014", tag, "(overall)")) + theme_pub
-    if (nchar(stars) > 0) plt <- plt + annotate("text", x = ar[1] + 1, y = max(dm$md) * 0.95,
-                                                  label = stars, size = 8, hjust = 0)
+    if (nchar(stars) > 0) plt <- plt + annotate("text", x = mean(ar), y = Inf, vjust = 1.3,
+                                                  label = stars, size = 8, hjust = 0.5)
     save_plot(plt, paste0(tag, "_overall"), output_dir)
 
     # By categorical
@@ -266,6 +271,7 @@ generate_area_diag_plots <- function(model, data, cell_label, area_col,
       theme_pub + theme(legend.position = "bottom")
     save_plot(plt_b, paste0("3way_", tag, "_facet_diagnosis"), output_dir, 10, 5)
   }
+  invisible(fig_data)
 }
 
 
@@ -350,6 +356,10 @@ generate_area_combined_diag_plots <- function(model, data, cell_label, area_col,
 
 generate_area_t1d_plots <- function(model, data, cell_label, area_col,
                                      has_islet, output_dir) {
+  # The data behind this function's published panel, returned for
+  # plot_area_figures.R. (Plots themselves are not kept: each one holds the
+  # function's environment, model included, and would exhaust memory.)
+  fig_data <- list()
   cat("    Generating T1D plots for", cell_label, "...\n")
 
   dm_cat <- function(...) {
@@ -371,9 +381,9 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
       sig_text <- p_to_stars(prs$p.value[1])
     }
     plt <- ggplot() +
-      geom_violin(data = dm, aes(x = .data[[fac]], y = md, fill = .data[[fac]]),
+      geom_violin(data = dm, aes(x = .data[[!!fac]], y = md, fill = .data[[!!fac]]),
                   alpha = 0.3, color = NA, width = 0.7) +
-      geom_jitter(data = dm, aes(x = .data[[fac]], y = md, color = .data[[fac]]),
+      geom_jitter(data = dm, aes(x = .data[[!!fac]], y = md, color = .data[[!!fac]]),
                   width = 0.15, size = 1.5, alpha = 0.6) +
       scale_fill_manual(values = cols, guide = "none") + scale_color_manual(values = cols, guide = "none") +
       labs(x = if (fac == "Region") "Pancreatic region" else NULL, y = y_lab_area,
@@ -427,7 +437,7 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
                                           lab = "Islet size (log cells)", tag = "islet")
   for (cs in cont_specs) {
     cv <- cs$var; rv <- cs$raw; xl <- cs$lab; tag <- cs$tag
-    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]], na.rm = TRUE)
+    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]] - data[[cv]], na.rm = TRUE)  # model's zero: the plotted subsets are not re-centred
     cv_seq <- seq(ar[1] - mc, ar[2] - mc, length.out = 50)
     at_list <- setNames(list(cv_seq), cv)
     cat("      ", tag, "slopes...\n")
@@ -442,9 +452,10 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
       geom_line(data = e_ov, aes(x = x, y = response), linewidth = 0.9, color = "black") +
       geom_point(data = dm, aes(x = x, y = md), color = col_t1d, alpha = 0.6, size = 2) +
       labs(x = xl, y = y_lab_area, title = paste(cell_label, "\u2014", tag, "overall (T1D)")) + theme_pub
-    if (nchar(stars) > 0) plt <- plt + annotate("text", x = ar[1] + 1, y = max(dm$md) * 0.95,
-                                                  label = stars, size = 8, hjust = 0)
+    if (nchar(stars) > 0) plt <- plt + annotate("text", x = mean(ar), y = Inf, vjust = 1.3,
+                                                  label = stars, size = 8, hjust = 0.5)
     save_plot(plt, paste0(tag, "_overall"), output_dir)
+    if (tag == "dd") fig_data$dd_overall <- list(points = dm, curve = e_ov[, c("x", "response", "lo", "hi")], stars = stars)
 
     for (bi in list(list(v = "Region", cols = colors_region), list(v = "Sex", cols = colors_sex))) {
       bv <- bi$v
@@ -470,7 +481,7 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
                            lab = "Disease duration (years)", cond = "age_at_onset_c", tag = "dd_region_ao"),
                       list(var = "age_at_onset_c", raw = "age_at_onset",
                            lab = "Age at onset (years)", cond = "Disease.Duration_c", tag = "ao_region_dd"))) {
-    ar <- range(data[[focal$raw]], na.rm = TRUE); mc <- mean(data[[focal$raw]], na.rm = TRUE)
+    ar <- range(data[[focal$raw]], na.rm = TRUE); mc <- mean(data[[focal$raw]] - data[[focal$var]], na.rm = TRUE)  # model's zero: the plotted subsets are not re-centred
     cond_sd <- sd(data[[focal$cond]], na.rm = TRUE)
     cv_seq <- seq(ar[1] - mc, ar[2] - mc, length.out = 50)
     preds_list <- list()
@@ -501,7 +512,7 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
                              lab = "Disease duration (years)", tag = "dd_region_islet"),
                         list(var = "age_at_onset_c", raw = "age_at_onset",
                              lab = "Age at onset (years)", tag = "ao_region_islet"))) {
-      ar <- range(data[[focal$raw]], na.rm = TRUE); mc <- mean(data[[focal$raw]], na.rm = TRUE)
+      ar <- range(data[[focal$raw]], na.rm = TRUE); mc <- mean(data[[focal$raw]] - data[[focal$var]], na.rm = TRUE)  # model's zero: the plotted subsets are not re-centred
       isd <- sd(data$log_Islet.Cells_c, na.rm = TRUE)
       cv_seq <- seq(ar[1] - mc, ar[2] - mc, length.out = 50)
       preds_list <- list()
@@ -524,6 +535,7 @@ generate_area_t1d_plots <- function(model, data, cell_label, area_col,
       save_plot(plt, paste0("3way_", focal$tag), output_dir, 10, 5)
     }
   }
+  invisible(fig_data)
 }
 
 
@@ -555,7 +567,7 @@ generate_area_combined_t1d_plots <- function(model, data, cell_label, area_col, 
                    list(var = "age_at_onset_c", raw = "age_at_onset",
                         lab = "Age at onset (years)", tag = "ao"))) {
     cv <- cs$var; rv <- cs$raw; xl <- cs$lab; tag <- cs$tag
-    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]], na.rm = TRUE)
+    ar <- range(data[[rv]], na.rm = TRUE); mc <- mean(data[[rv]] - data[[cv]], na.rm = TRUE)  # model's zero: the plotted subsets are not re-centred
     cv_seq <- seq(ar[1] - mc, ar[2] - mc, length.out = 50)
     at_list <- setNames(list(cv_seq), cv)
 

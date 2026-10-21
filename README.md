@@ -67,10 +67,10 @@ Endocrine-object size classes and the islet thresholds are defined in `Create_co
 
 **R.** Local analyses: R 4.4.2. Cluster models: R 4.5.0.
 
-**Packages:**
-- **Data handling and plotting:** tidyverse (dplyr, readr, stringr, ggplot2 3.5.1), janitor, readxl, openxlsx, writexl, patchwork, cowplot, ggtext, rlang, knitr, officer, flextable
-- **Mixed models:** glmmTMB 1.1.9, emmeans 1.10.4, car
-- **Bayesian models:** brms 2.22.0, ordbetareg 0.8, cmdstanr 0.9.0 with CmdStan 2.37.0, coda
+**Packages** (the versions that produced the published results):
+- **Data handling and plotting:** tidyverse 2.0.0 (dplyr 1.2.1, readr 2.2.0, stringr 1.6.0, ggplot2 4.0.3), janitor, readxl, openxlsx 4.2.9, writexl, patchwork, cowplot, ggtext, scales 1.4.0, rlang 1.2.0, knitr 1.52, officer, flextable
+- **Mixed models:** glmmTMB 1.1.15.2 (the saved models were fitted with 1.1.9; see Step 3), emmeans 2.0.4, car
+- **Bayesian models:** fitted on the cluster with brms 2.22.0, ordbetareg 0.8, and cmdstanr 0.9.0 with CmdStan 2.37.0; summarised locally with brms 2.23.0 and coda 0.19-4.1
 
 ## Running the analysis
 

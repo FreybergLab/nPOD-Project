@@ -125,7 +125,7 @@ All five scripts read from `Data/`. `ord_beta_reg_HTC.R` writes its model files 
 | `rate_models.Rmd` | Fits the per-cell rate models (negative binomial with a log cell-count offset); saves them and `rate_results.rds` to `Marker_Rate_Models/` |
 | `rate_units.Rmd` | Tabulates rate-model effects (`rate_models_effects.csv`, `rate_models_units.csv`) |
 | `survivor_selection_test.Rmd` | Tests whether survivor selection could explain the T1D composition (`selection_burden_per_donor.csv`, `selection_density_inequality.csv`) |
-| `Marker_analysis.Rmd` and `R/` | Loads the rate models, checks every model-derived rate against the observed rate, and writes `Results/marker_effects.csv`, the rate workbooks (`Results/Rate/`), the sensitivity table (`Results/marker_sensitivity.csv`) and Supplementary Figure 16 (`Graphs/marker_main_figure`) |
+| `Marker_analysis.Rmd` and `R/` | Loads the rate models, checks every model-derived rate against the observed rate, and writes `Marker/Results/marker_effects.csv`, the rate workbooks (`Marker/Results/Rate/`), the sensitivity table (`Marker/Results/marker_sensitivity.csv`) and Supplementary Figure 16 (`Marker/Graphs/marker_main_figure`). The published copies of these results are in `Results/Marker/`. |
 
 Earlier per-islet count (abundance) models were superseded by these rate models and are not used in the paper, so their code and workbooks are not included.
 
@@ -154,7 +154,7 @@ The area analyses save about 180 plots per cell type, and a single R session can
 | File | What it does |
 |---|---|
 | `Sensitivity/sensitivity_local.R` | Runs locally. Data checks, then the islet-density, cells-per-islet and single-cell-area sensitivity analyses; stops unless its baseline refits reproduce the published values. Writes its tables to `Sensitivity/`. |
-| `HTC Models/sensitivity_composition_HTC.R` | Composition refits on the cluster, one variant per job. Run `sensitivity_check.sbatch` once, then `sensitivity_array.sbatch`, then `Rscript sensitivity_composition_HTC.R summarize`, and copy `Sensitivity/composition_sensitivity.csv` back. |
+| `HTC Models/sensitivity_composition_HTC.R` | Composition refits on the cluster, one variant per job. Run `Rscript sensitivity_composition_HTC.R check` once, then one fit per call (`Rscript sensitivity_composition_HTC.R <outcome> <variant> [model]`, as listed at the top of the file), then `Rscript sensitivity_composition_HTC.R summarize`, and copy `Sensitivity/composition_sensitivity.csv` back. |
 | `Marker/R/marker_sensitivity.R` | Ki-67 and CD3 sensitivity refits, run by `Marker_analysis.Rmd` |
 
 ## Figures not produced by code in this repository
@@ -167,7 +167,7 @@ The area analyses save about 180 plots per cell type, and a single R session can
 
 ## Results folder
 
-`Results/` contains the model-output workbooks that Supplementary Table 2 is built from, organized by analysis: density, cell-type proportions and counts, the β/(α+β) ratio, and total and per-cell area. The Ki-67 and CD3 rate workbooks are in `Marker/Results/Rate/`.
+`Results/` contains the model-output workbooks that Supplementary Table 2 is built from, collected from each analysis's `<folder>/Results/` and organized by analysis: density, cell-type proportions and counts, the β/(α+β) ratio, total and per-cell area, and the Ki-67 and CD3 rates (`Results/Marker/`).
 
 ## Citation, license and contact
 

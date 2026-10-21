@@ -264,25 +264,44 @@ if (length(args) >= 1 && args[1] == "check") {
   raw_of <- c(Age_c = "Age", log_Islet.Cells_c = "log_Islet.Cells",
               Disease.Duration_c = "Disease.Duration", age_at_onset_c = "age_at_onset")
   with_onset <- function(d) mutate(d, age_at_onset = Age - Disease.Duration)
-  raw_at_zero <- function(d) {     # the raw value where each centred predictor is 0
+  # The raw value where each of a fit's centred predictors is 0, from the fit
+  # itself: mean(raw) - mean(centred) over the rows it was fitted on. The
+  # centred columns in Data/quad_data.rds are not relied on, because they need
+  # not be the ones a published fit used.
+  zero_of <- function(fit, d) {
+    shared <- intersect(names(fit$data), names(d))
+    d <- d[complete.cases(d[shared]), , drop = FALSE]   # rows brms would keep
+    if (nrow(d) != nrow(fit$data)) {
+      stop("a fit has ", nrow(fit$data), " rows but its data set has ", nrow(d))
+    }
     d <- with_onset(d)
-    sapply(names(raw_of), function(v) mean(d[[raw_of[[v]]]] - d[[v]], na.rm = TRUE))
+    sapply(names(raw_of), function(v) {
+      if (!v %in% names(fit$data)) return(NA_real_)
+      mean(d[[raw_of[[v]]]], na.rm = TRUE) - mean(fit$data[[v]], na.rm = TRUE)
+    })
   }
   pub_sets  <- list(diag = readRDS("Data/quad_data.rds"))
   pub_sets$ao <- filter(pub_sets$diag, Diagnosis == "T1D")
-  reference <- list(
-    diag = raw_at_zero(pub_sets$diag),                # the published models' own 0
-    ao   = with_onset(pub_sets$ao) %>%                # the T1D averages
-      { setNames(sapply(raw_of, function(r) mean(.[[r]], na.rm = TRUE)), names(raw_of)) })
-  shift_for <- function(model, variant) {
-    d <- if (variant == "published") pub_sets[[model]] else build_data(variant, model)
-    reference[[model]] - raw_at_zero(d)
+  t1d_average <- with_onset(pub_sets$ao) %>%
+    { setNames(sapply(raw_of, function(r) mean(.[[r]], na.rm = TRUE)), names(raw_of)) }
+  # Reference points, taken from each published fit (summarized before its
+  # refits): a diagnosis model's own 0, or the T1D averages for a T1D model.
+  reference <- list()
+  shift_for <- function(fit, outcome, model, variant) {
+    d    <- if (variant == "published") pub_sets[[model]] else build_data(variant, model)
+    zero <- zero_of(fit, d)
+    key  <- paste(outcome, model)
+    if (variant == "published") reference[[key]] <<- if (model == "diag") zero else t1d_average
+    if (is.null(reference[[key]])) stop("no published ", key, " fit to take the reference point from")
+    s <- reference[[key]] - zero
+    s[is.na(s)] <- 0   # predictors this model does not use
+    s
   }
 
   out <- pmap_dfr(bind_rows(published, sens), function(path, outcome, model, variant) {
     cat("summarizing", path, "\n")
     fit <- readRDS(path)
-    res <- summarise_fit(fit, model, shift_for(model, variant)) %>%
+    res <- summarise_fit(fit, model, shift_for(fit, outcome, model, variant)) %>%
       mutate(outcome = outcome, model = model, variant = variant, .before = 1)
     rm(fit); gc()
     res

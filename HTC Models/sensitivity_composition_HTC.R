@@ -72,12 +72,38 @@ RE <- c(base   = "(1|Donor) + (1|Donor:ImageID)",
         slopes = "(1 + log_Islet.Cells_c|Donor) + (1|Donor:ImageID)")
 PUBLISHED <- c(diag = "Models/%s_powered_model.rds", ao = "Models/%s_ao_model.rds")
 
-# Table S2 values the summary must reproduce from the published fits.
+# Table S2 values the summary must reproduce from the published fits: every
+# quantity it reports, from the workbooks Table S2 is built from
+# (Results/<cell> Proportions/*_Content_Primary_Analysis.xlsx for the diagnosis
+# models, *_Content_AO_Analysis.xlsx for the T1D models). T1D - ND is the
+# negative of the workbooks' ND - T1D.
 S2_CHECK <- tribble(
-  ~outcome, ~model, ~quantity,        ~level,     ~s2,
-  "ins",    "diag", "T1D - ND",       "T1D - ND", -0.5814,  # Fig 3: ND - T1D = 0.5814
-  "ins",    "ao",   "duration_slope", "overall",  -0.0289   # Fig 7E
+  ~outcome, ~model, ~quantity,         ~level,     ~s2,
+  "ins",    "diag", "T1D - ND",         "T1D - ND", -0.5814,
+  "ins",    "diag", "islet_size_slope", "ND",       +0.0037,
+  "ins",    "diag", "islet_size_slope", "T1D",      +0.0081,
+  "ins",    "ao",   "duration_slope",   "overall",  -0.0174,
+  "ins",    "ao",   "islet_size_slope", "overall",  +0.0104,
+  "glu",    "diag", "T1D - ND",         "T1D - ND", +0.4613,
+  "glu",    "diag", "islet_size_slope", "ND",       +0.0542,
+  "glu",    "diag", "islet_size_slope", "T1D",      +0.0312,
+  "glu",    "ao",   "duration_slope",   "overall",  +0.0261,
+  "glu",    "ao",   "islet_size_slope", "overall",  +0.0294,
+  "soma",   "diag", "T1D - ND",         "T1D - ND", +0.0037,
+  "soma",   "diag", "islet_size_slope", "ND",       -0.0375,
+  "soma",   "diag", "islet_size_slope", "T1D",      -0.0155,
+  "soma",   "ao",   "duration_slope",   "overall",  -0.0061,
+  "soma",   "ao",   "islet_size_slope", "overall",  -0.0118,
+  "pp",     "diag", "T1D - ND",         "T1D - ND", +0.0051,
+  "pp",     "diag", "islet_size_slope", "ND",       -0.0154,
+  "pp",     "diag", "islet_size_slope", "T1D",      -0.0228,
+  "pp",     "ao",   "duration_slope",   "overall",  +0.0034,
+  "pp",     "ao",   "islet_size_slope", "overall",  -0.0203 
 )
+# The published fits are the same draws summarised the same way, so they must
+# match to the precision Table S2 reports: half a unit in the 4th decimal
+# (0.00005), plus a little for floating point.
+S2_TOL <- 6e-5
 
 # ============================================================
 # DATA AND FIT
@@ -142,11 +168,17 @@ fit_one <- function(outcome, variant, model) {
 # Same method as the published tables (Proportion/R/generate_diag_excel_results.R
 # and generate_proportion_t1d_excel.R), so a published fit reproduces Table S2:
 # expected proportions without random effects, other continuous predictors at
-# 0, in every Region x Sex cell; a slope is (fit at +1 - fit at -1) / 2; cells
-# are averaged with equal weight.
-summarise_fit <- function(fit, model) {
+# the published data's averages, in every Region x Sex cell; a slope is
+# (fit at +1 - fit at -1) / 2; cells are averaged with equal weight.
+#
+# Grid values are offsets from those averages. `shift` moves them into this
+# fit's own centred units just before predicting (see shift_for() below).
+summarise_fit <- function(fit, model, shift = NULL) {
   cells  <- expand_grid(Region = c("Head", "Body", "Tail"), Sex = c("Female", "Male"))
-  fitted_draws <- function(grid) fitted(fit, newdata = grid, re_formula = NA, summary = FALSE)
+  fitted_draws <- function(grid) {
+    for (v in names(shift)) if (v %in% names(grid)) grid[[v]] <- grid[[v]] + shift[[v]]
+    fitted(fit, newdata = grid, re_formula = NA, summary = FALSE)
+  }
   # Slope over var: the grid's cells at var = -1 and +1, in the same cell order.
   slope_draws <- function(base, var, keep = rep(TRUE, nrow(base))) {
     g <- bind_rows(mutate(base, !!var := -1), mutate(base, !!var := 1))
@@ -218,18 +250,46 @@ if (length(args) >= 1 && args[1] == "check") {
             paste(published$path[!file.exists(published$path)], collapse = ", "))
   }
   published <- published %>% filter(file.exists(path))
+  if (nrow(published) + nrow(sens) == 0) {
+    stop("no fits found in Models/ or Models_sens/ under ", getwd(),
+         ". Run Rscript from the folder that holds them.")
+  }
+
+  # Every fit is measured at the raw values where Table S2 measures the
+  # published fits: the diagnosis models at their own 0, and the T1D models at
+  # the T1D averages. So a sensitivity row differs from the published row only
+  # through its data, not through a moved reference point. The published T1D
+  # models were centred on ND + T1D data, so their own 0 is not the T1D average
+  # (for duration it is ~1.4 years); each refit is centred on its own subset.
+  raw_of <- c(Age_c = "Age", log_Islet.Cells_c = "log_Islet.Cells",
+              Disease.Duration_c = "Disease.Duration", age_at_onset_c = "age_at_onset")
+  with_onset <- function(d) mutate(d, age_at_onset = Age - Disease.Duration)
+  raw_at_zero <- function(d) {     # the raw value where each centred predictor is 0
+    d <- with_onset(d)
+    sapply(names(raw_of), function(v) mean(d[[raw_of[[v]]]] - d[[v]], na.rm = TRUE))
+  }
+  pub_sets  <- list(diag = readRDS("Data/quad_data.rds"))
+  pub_sets$ao <- filter(pub_sets$diag, Diagnosis == "T1D")
+  reference <- list(
+    diag = raw_at_zero(pub_sets$diag),                # the published models' own 0
+    ao   = with_onset(pub_sets$ao) %>%                # the T1D averages
+      { setNames(sapply(raw_of, function(r) mean(.[[r]], na.rm = TRUE)), names(raw_of)) })
+  shift_for <- function(model, variant) {
+    d <- if (variant == "published") pub_sets[[model]] else build_data(variant, model)
+    reference[[model]] - raw_at_zero(d)
+  }
 
   out <- pmap_dfr(bind_rows(published, sens), function(path, outcome, model, variant) {
     cat("summarizing", path, "\n")
     fit <- readRDS(path)
-    res <- summarise_fit(fit, model) %>%
+    res <- summarise_fit(fit, model, shift_for(model, variant)) %>%
       mutate(outcome = outcome, model = model, variant = variant, .before = 1)
     rm(fit); gc()
     res
   }) %>%
     left_join(S2_CHECK, by = c("outcome", "model", "quantity", "level")) %>%
     mutate(reproduces_S2 = if_else(variant == "published" & !is.na(s2),
-                                   abs(estimate - s2) < 0.002, NA))
+                                   abs(estimate - s2) <= S2_TOL, NA))
 
   if (any(out$reproduces_S2 %in% FALSE)) {
     warning("A published fit does not reproduce Table S2; the summary method differs from yours.")

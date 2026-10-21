@@ -700,6 +700,18 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
   type_label <- if (model_type == "dd") "Disease Duration" else "Age at Onset"
   type_tag   <- toupper(model_type)
 
+  # Reference values for the continuous predictors: the T1D averages, in the
+  # model's own units. The published ratio T1D model was centred on all cutoff
+  # objects (ND + T1D), so its 0 is not the T1D average (for duration it is
+  # ~1.5 years); the mean of each centred predictor in the model's data is.
+  # For a model centred on T1D data this is 0 and nothing changes.
+  ref <- sapply(c("Disease.Duration_c", age_var, "log_Islet.Cells_c"),
+                function(v) mean(model$data[[v]], na.rm = TRUE))
+  raw_age <- if (model_type == "dd") data$Age else data$age_at_onset
+  cat(sprintf("Slopes and contrasts evaluated at the T1D averages: duration %.2f y, %s %.2f y, islet size %.1f cells (geometric mean)\n",
+              mean(data$Disease.Duration, na.rm = TRUE), tolower(age_label), mean(raw_age, na.rm = TRUE),
+              exp(mean(data$log_Islet.Cells, na.rm = TRUE))))
+
   cat("\n=============================================================================\n")
   cat("GENERATING", type_tag, "ANALYSIS EXCEL: BETA:ALPHA RATIO (T1D)\n")
   cat("=============================================================================\n\n")
@@ -727,9 +739,9 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
   cat_grid <- expand.grid(
     Region = c("Head", "Body", "Tail"),
     Sex = c("Female", "Male"),
-    Disease.Duration_c = 0, log_Islet.Cells_c = 0
+    Disease.Duration_c = ref[["Disease.Duration_c"]], log_Islet.Cells_c = ref[["log_Islet.Cells_c"]]
   )
-  cat_grid[[age_var]] <- 0
+  cat_grid[[age_var]] <- ref[[age_var]]
 
   post_fitted <- get_posterior_fitted(model, cat_grid)
   col_names <- paste(cat_grid$Region, cat_grid$Sex, sep = "_")
@@ -816,20 +828,20 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
 
   # DD slopes
   dd_grid <- expand.grid(Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
-                         Disease.Duration_c = c(-1, 1), log_Islet.Cells_c = 0)
-  dd_grid[[age_var]] <- 0
+                         Disease.Duration_c = ref[["Disease.Duration_c"]] + c(-1, 1), log_Islet.Cells_c = ref[["log_Islet.Cells_c"]])
+  dd_grid[[age_var]] <- ref[[age_var]]
 
   # Age/AO slopes
   age_grid <- expand.grid(Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
-                          Disease.Duration_c = 0, log_Islet.Cells_c = 0)
-  age_grid_low <- age_grid; age_grid_low[[age_var]] <- -1
-  age_grid_high <- age_grid; age_grid_high[[age_var]] <- 1
+                          Disease.Duration_c = ref[["Disease.Duration_c"]], log_Islet.Cells_c = ref[["log_Islet.Cells_c"]])
+  age_grid_low <- age_grid; age_grid_low[[age_var]] <- ref[[age_var]] - 1
+  age_grid_high <- age_grid; age_grid_high[[age_var]] <- ref[[age_var]] + 1
   age_grid_full <- bind_rows(age_grid_low, age_grid_high)
 
   # Islet slopes
   islet_grid <- expand.grid(Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
-                            Disease.Duration_c = 0, log_Islet.Cells_c = c(-1, 1))
-  islet_grid[[age_var]] <- 0
+                            Disease.Duration_c = ref[["Disease.Duration_c"]], log_Islet.Cells_c = ref[["log_Islet.Cells_c"]] + c(-1, 1))
+  islet_grid[[age_var]] <- ref[[age_var]]
 
   post_dd    <- get_posterior_fitted(model, dd_grid)
   post_age   <- get_posterior_fitted(model, age_grid_full)
@@ -840,16 +852,16 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
   for (reg in c("Head", "Body", "Tail")) {
     for (s in c("Female", "Male")) {
       key <- paste(reg, s, sep = "_")
-      lo <- which(dd_grid$Region == reg & dd_grid$Sex == s & dd_grid$Disease.Duration_c == -1)
-      hi <- which(dd_grid$Region == reg & dd_grid$Sex == s & dd_grid$Disease.Duration_c == 1)
+      lo <- which(dd_grid$Region == reg & dd_grid$Sex == s & dd_grid$Disease.Duration_c < ref[["Disease.Duration_c"]])
+      hi <- which(dd_grid$Region == reg & dd_grid$Sex == s & dd_grid$Disease.Duration_c > ref[["Disease.Duration_c"]])
       dd_slopes_list[[key]] <- (post_dd[, hi] - post_dd[, lo]) / 2
 
       lo <- which(age_grid_low$Region == reg & age_grid_low$Sex == s)
       hi <- which(age_grid_high$Region == reg & age_grid_high$Sex == s) + n_cells
       age_slopes_list[[key]] <- (post_age[, hi] - post_age[, lo]) / 2
 
-      lo <- which(islet_grid$Region == reg & islet_grid$Sex == s & islet_grid$log_Islet.Cells_c == -1)
-      hi <- which(islet_grid$Region == reg & islet_grid$Sex == s & islet_grid$log_Islet.Cells_c == 1)
+      lo <- which(islet_grid$Region == reg & islet_grid$Sex == s & islet_grid$log_Islet.Cells_c < ref[["log_Islet.Cells_c"]])
+      hi <- which(islet_grid$Region == reg & islet_grid$Sex == s & islet_grid$log_Islet.Cells_c > ref[["log_Islet.Cells_c"]])
       islet_slopes_list[[key]] <- (post_islet[, hi] - post_islet[, lo]) / 2
     }
   }
@@ -890,8 +902,8 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
   cat("Computing 3-way interactions...\n")
 
   compute_3way <- function(slopes_list, model, dd_grid_template, modifier_var, modifier_label) {
-    grid_lo <- dd_grid_template; grid_lo[[modifier_var]] <- -1
-    grid_hi <- dd_grid_template; grid_hi[[modifier_var]] <- 1
+    grid_lo <- dd_grid_template; grid_lo[[modifier_var]] <- ref[[modifier_var]] - 1
+    grid_hi <- dd_grid_template; grid_hi[[modifier_var]] <- ref[[modifier_var]] + 1
     post_lo <- get_posterior_fitted(model, grid_lo)
     post_hi <- get_posterior_fitted(model, grid_hi)
 
@@ -901,8 +913,8 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
       for (reg in c("Head", "Body", "Tail")) {
         sex_slopes <- list()
         for (s in c("Female", "Male")) {
-          lo <- which(dd_grid_template$Region == reg & dd_grid_template$Sex == s & dd_grid_template$Disease.Duration_c == -1)
-          hi <- which(dd_grid_template$Region == reg & dd_grid_template$Sex == s & dd_grid_template$Disease.Duration_c == 1)
+          lo <- which(dd_grid_template$Region == reg & dd_grid_template$Sex == s & dd_grid_template$Disease.Duration_c < ref[["Disease.Duration_c"]])
+          hi <- which(dd_grid_template$Region == reg & dd_grid_template$Sex == s & dd_grid_template$Disease.Duration_c > ref[["Disease.Duration_c"]])
           sex_slopes[[s]] <- (pm[, hi] - pm[, lo]) / 2
         }
         draws <- rowMeans(do.call(cbind, sex_slopes))
@@ -933,8 +945,8 @@ generate_ratio_t1d_excel <- function(model, data, model_type = "dd",
   }
 
   dd_grid_base <- expand.grid(Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
-                              Disease.Duration_c = c(-1, 1), log_Islet.Cells_c = 0)
-  dd_grid_base[[age_var]] <- 0
+                              Disease.Duration_c = ref[["Disease.Duration_c"]] + c(-1, 1), log_Islet.Cells_c = ref[["log_Islet.Cells_c"]])
+  dd_grid_base[[age_var]] <- ref[[age_var]]
 
   three_way_age <- compute_3way(dd_slopes_list, model, dd_grid_base, age_var, age_label)
   three_way_islet <- compute_3way(dd_slopes_list, model, dd_grid_base, "log_Islet.Cells_c", "Islet size")

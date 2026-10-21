@@ -167,7 +167,7 @@ get_t1d_cont_preds <- function(model, data, focal_var, by_vars,
     Region = c("Head", "Body", "Tail"),
     Sex = c("Female", "Male"), stringsAsFactors = FALSE
   )
-  for (cv in all_cont_vars) grid[[cv]] <- 0
+  for (cv in all_cont_vars) grid[[cv]] <- t1d_average(model, cv)
   # Overwrite focal with sequence
   grid <- grid[rep(seq_len(nrow(grid)), each = n_points), ]
   grid[[focal_var]] <- rep(focal_seq, times = nrow(grid) / n_points)
@@ -191,9 +191,10 @@ compute_t1d_slopes <- function(model, data, focal_var, by_vars, all_cont_vars) {
     Region = c("Head", "Body", "Tail"),
     Sex = c("Female", "Male"), stringsAsFactors = FALSE
   )
-  for (cv in all_cont_vars) grid[[cv]] <- 0
+  for (cv in all_cont_vars) grid[[cv]] <- t1d_average(model, cv)
   grid_lo <- grid; grid_hi <- grid
-  grid_lo[[focal_var]] <- -1; grid_hi[[focal_var]] <- 1
+  grid_lo[[focal_var]] <- t1d_average(model, focal_var) - 1
+  grid_hi[[focal_var]] <- t1d_average(model, focal_var) + 1
   grid_both <- bind_rows(grid_lo %>% mutate(.level = "lo"),
                          grid_hi %>% mutate(.level = "hi"))
   post <- get_posterior_fitted(model, grid_both %>% select(-.level))
@@ -320,13 +321,35 @@ plot_t1d_sex_by_region <- function(data, model, cont_vars, y_lab) {
           legend.background = element_rect(fill = "white", color = NA))
 }
 
+# Where a model's centred variable is 0, in raw units. The published T1D models
+# were centred on ND + T1D islets, not on the T1D data passed in for plotting,
+# so the offset must come from the model's own data rather than mean(raw).
+# For a model centred on the plotted data itself, this equals mean(raw).
+model_zero <- function(model, data, raw, centred) {
+  if (!centred %in% names(model$data)) return(mean(data[[raw]], na.rm = TRUE))
+  if (nrow(data) != nrow(model$data)) {
+    warning(sprintf("plot data has %d rows but the model has %d; the %s axis may be offset",
+                    nrow(data), nrow(model$data), raw))
+  }
+  mean(data[[raw]], na.rm = TRUE) - mean(model$data[[centred]], na.rm = TRUE)
+}
+
+# T1D average of a centred predictor, in the model's own units. The published
+# T1D models were centred on ND + T1D data, so their 0 is not the T1D average;
+# for a model centred on T1D data this is 0 and nothing changes.
+t1d_average <- function(model, var) mean(model$data[[var]], na.rm = TRUE)
+
 # --- Generic T1D continuous slope plot ---
 plot_t1d_slope <- function(data, model, focal_var, raw_var, by_var, colors,
                            all_cont_vars, y_lab, x_lab, title_text) {
-  preds <- get_t1d_cont_preds(model, data, focal_var,
+  mean_offset <- model_zero(model, data, raw_var, focal_var)
+  # The focal variable in the model's own centring, so the curve spans the
+  # observed raw range.
+  data_m <- data
+  data_m[[focal_var]] <- data[[raw_var]] - mean_offset
+  preds <- get_t1d_cont_preds(model, data_m, focal_var,
                               if (is.null(by_var)) character(0) else by_var,
                               all_cont_vars)
-  mean_offset <- mean(data[[raw_var]], na.rm = TRUE)
   preds$x <- preds[[focal_var]] + mean_offset
   
   dm <- data %>% group_by(Donor, !!!syms(if (is.null(by_var)) character(0) else by_var)) %>%
@@ -344,8 +367,8 @@ plot_t1d_slope <- function(data, model, focal_var, raw_var, by_var, colors,
       geom_point(data = dm, aes(x = x, y = md), color = col_t1d, alpha = 0.6, size = 2) +
       labs(x = x_lab, y = y_lab, title = title_text) + theme_pub
     if (nchar(stars) > 0)
-      plt <- plt + annotate("text", x = min(preds$x) + 1, y = max(dm$md) * 0.95,
-                            label = stars, size = 8, hjust = 0)
+      plt <- plt + annotate("text", x = mean(range(preds$x)), y = Inf, vjust = 1.3,
+                            label = stars, size = 8, hjust = 0.5)
     return(plt)
   }
   
@@ -389,8 +412,8 @@ plot_t1d_slope <- function(data, model, focal_var, raw_var, by_var, colors,
         diff <- d1 - d2; pd <- pmax(mean(diff > 0), mean(diff < 0))
         star <- prob_to_stars(pd)
         if (nchar(star) > 0)
-          plt <- plt + annotate("text", x = min(preds$x) + 1, y = max(dm$md) * 0.95,
-                                label = star, size = 8, hjust = 0)
+          plt <- plt + annotate("text", x = mean(range(preds$x)), y = Inf, vjust = 1.3,
+                                label = star, size = 8, hjust = 0.5)
       }
     }
   }
@@ -400,9 +423,9 @@ plot_t1d_slope <- function(data, model, focal_var, raw_var, by_var, colors,
 # --- T1D 3-way: continuous × Region, faceted at ±1 SD of another continuous ---
 plot_t1d_3way <- function(data, model, focal_var, raw_focal, cond_var,
                           all_cont_vars, y_lab, x_lab, title_text) {
-  focal_range <- range(data[[focal_var]], na.rm = TRUE)
+  mean_offset <- model_zero(model, data, raw_focal, focal_var)
+  focal_range <- range(data[[raw_focal]], na.rm = TRUE) - mean_offset
   focal_seq <- seq(focal_range[1], focal_range[2], length.out = 50)
-  mean_offset <- mean(data[[raw_focal]], na.rm = TRUE)
   cond_sd <- sd(data[[cond_var]], na.rm = TRUE)
   
   preds_list <- list()
@@ -411,10 +434,10 @@ plot_t1d_3way <- function(data, model, focal_var, raw_focal, cond_var,
       Region = c("Head", "Body", "Tail"),
       Sex = c("Female", "Male"), stringsAsFactors = FALSE
     )
-    for (cv in all_cont_vars) grid[[cv]] <- 0
+    for (cv in all_cont_vars) grid[[cv]] <- t1d_average(model, cv)
     grid <- grid[rep(seq_len(nrow(grid)), each = length(focal_seq)), ]
     grid[[focal_var]] <- rep(focal_seq, times = nrow(grid) / length(focal_seq))
-    grid[[cond_var]] <- lev * cond_sd
+    grid[[cond_var]] <- t1d_average(model, cond_var) + lev * cond_sd
     
     post <- get_posterior_fitted(model, grid)
     result <- grid %>% mutate(cell_id = row_number()) %>%
@@ -573,7 +596,8 @@ generate_all_ratio_plots <- function(model_dir = "Ratio/Models",
   dir_t1d <- file.path(output_dir, "T1D")
   cat("\n--- T1D Model (21 plots from AO parameterization) ---\n")
   m <- readRDS(file.path(model_dir, "ratio_ao_model.rds"))
-  t1d_cont <- c("Disease.Duration_c" = 0, "age_at_onset_c" = 0, "log_Islet.Cells_c" = 0)
+  t1d_cont <- sapply(c("Disease.Duration_c", "age_at_onset_c", "log_Islet.Cells_c"),
+                     function(v) t1d_average(m, v))
   t1d_all <- c("Disease.Duration_c", "age_at_onset_c", "log_Islet.Cells_c")
   
   # Categorical
@@ -759,8 +783,11 @@ generate_supplementary_figure_S10 <- function(
     theme(plot.tag = element_text(size = 16, face = "bold"))
   
   dir.create(dirname(output_file), recursive = TRUE, showWarnings = FALSE)
-  ggsave(output_file, fig, width = 16, height = 18, dpi = 300)
+  # cairo_pdf draws the Greek letters; the default pdf() prints "ß/(a+ß)" instead
+  ggsave(output_file, fig, width = 16, height = 18, dpi = 300,
+         device = if (grepl("\\.pdf$", output_file)) cairo_pdf else NULL)
   cat("Saved Supplementary Figure S10 to:", output_file, "\n")
+  invisible(list(fig = fig, panels = list(a = pA, b = pB, c = pC, d = pD, e = pE, f = pF)))
 }
 
 

@@ -31,13 +31,13 @@ dir.create("Sensitivity", showWarnings = FALSE)
 # them through numeric, as Part C4 does.
 img_key <- function(x) as.character(as.numeric(as.character(x)))
 
-no_cutoff <- readRDS("../Data/no_cutoff_data.rds") %>%
+no_cutoff <- readRDS("Data/no_cutoff_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-cutoff <- readRDS("../Data/cutoff_data.rds") %>%
+cutoff <- readRDS("Data/cutoff_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-quad <- readRDS("../Data/quad_data.rds") %>%
+quad <- readRDS("Data/quad_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-density <- readRDS("../Data/density_data.rds") %>%
+density <- readRDS("Data/density_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
 
 

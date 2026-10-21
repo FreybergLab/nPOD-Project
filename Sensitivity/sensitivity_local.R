@@ -31,13 +31,13 @@ dir.create("Sensitivity", showWarnings = FALSE)
 # them through numeric, as Part C4 does.
 img_key <- function(x) as.character(as.numeric(as.character(x)))
 
-no_cutoff <- readRDS("Data/no_cutoff_data.rds") %>%
+no_cutoff <- readRDS("../Data/no_cutoff_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-cutoff <- readRDS("Data/cutoff_data.rds") %>%
+cutoff <- readRDS("../Data/cutoff_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-quad <- readRDS("Data/quad_data.rds") %>%
+quad <- readRDS("../Data/quad_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
-density <- readRDS("Data/density_data.rds") %>%
+density <- readRDS("../Data/density_data.rds") %>%
   mutate(Donor = as.character(Donor), ImageID = img_key(ImageID))
 
 
@@ -310,7 +310,8 @@ alpha_double_vs_quad <- alpha_by_stain %>%
 write_csv(alpha_double_vs_quad, "Sensitivity/alpha_double_vs_quad.csv")
 print(alpha_double_vs_quad)
 
-# Each donor's cell-weighted composition, then the median across donors.
+# Each donor's cell-weighted composition, then the mean and SD across donors.
+# Each donor's four fractions sum to 1, so the four means do too.
 composition_capped <- no_cutoff %>%
   filter(Stain == "Quad", Islet.Cells >= 15, log_Islet.Cells <= 5.5) %>%
   group_by(Diagnosis, Donor) %>%
@@ -318,7 +319,9 @@ composition_capped <- no_cutoff %>%
   mutate(total = Count.ins + Count.glu + Count.soma + Count.PP,
          across(c(Count.ins, Count.glu, Count.soma, Count.PP), ~ .x / total)) %>%
   group_by(Diagnosis) %>%
-  summarise(across(c(Count.ins, Count.glu, Count.soma, Count.PP), median))
+  summarise(donors = n(),
+            across(c(Count.ins, Count.glu, Count.soma, Count.PP), list(mean = mean, sd = sd),
+                   .names = "{.col}_{.fn}"))
 
 composition_uncapped <- no_cutoff %>%
   filter(Stain == "Quad", Islet.Cells >= 15) %>%
@@ -327,12 +330,14 @@ composition_uncapped <- no_cutoff %>%
   mutate(total = Count.ins + Count.glu + Count.soma + Count.PP,
          across(c(Count.ins, Count.glu, Count.soma, Count.PP), ~ .x / total)) %>%
   group_by(Diagnosis) %>%
-  summarise(across(c(Count.ins, Count.glu, Count.soma, Count.PP), median))
+  summarise(donors = n(),
+            across(c(Count.ins, Count.glu, Count.soma, Count.PP), list(mean = mean, sd = sd),
+                   .names = "{.col}_{.fn}"))
 
 composition_by_diagnosis <- bind_rows(capped_244 = composition_capped, uncapped = composition_uncapped,
                                       .id = "window")
 write_csv(composition_by_diagnosis, "Sensitivity/composition_by_diagnosis.csv")
-print(composition_by_diagnosis)
+print(composition_by_diagnosis, width = Inf)
 
 #  =============================================================================
 # Part 3: cells per islet against the beta-loss counterfactual

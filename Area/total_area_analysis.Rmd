@@ -161,6 +161,7 @@ output_dir <- "Area/Graphs/total_area"
 # Helper to run one cell type end-to-end
 run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, comb_model_name, comb_t1d_name) {
   cat("\n===", toupper(label), "===\n")
+  panels <- list(diag = list(), t1d = list())   # the published panels, for plot_area_figures.R
   
   for (sz in list(
     list(tag = "1cell", display = "Singlets", data = split_area_plot(p_singlets, cell_col),
@@ -171,9 +172,9 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
          model_file = paste0("area_", ct, "_15plus.rds"), has_islet = TRUE))) {
     cat("  Diag", sz$tag, "...\n")
     m <- readRDS(file.path(model_dir, sz$model_file))
-    generate_area_diag_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
+    panels$diag[[sz$tag]] <- generate_area_diag_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
                               area_col, sz$has_islet,
-                              file.path(output_dir, ct, "Diagnosis", sz$tag))
+                              file.path(output_dir, ct, "Diagnosis", sz$tag))$main_diagnosis
     rm(m); gc(); closeAllConnections()
   }
   
@@ -193,9 +194,9 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
          model_file = paste0("area_", ct, "_15plus_t1d.rds"), has_islet = TRUE))) {
     cat("  T1D", sz$tag, "...\n")
     m <- readRDS(file.path(model_dir, sz$model_file))
-    generate_area_t1d_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
+    panels$t1d[[sz$tag]] <- generate_area_t1d_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
                              area_col, sz$has_islet,
-                             file.path(output_dir, ct, "T1D", sz$tag))
+                             file.path(output_dir, ct, "T1D", sz$tag))$dd_overall
     rm(m); gc(); closeAllConnections()
   }
   
@@ -207,6 +208,8 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
   rm(m); gc(); closeAllConnections()
   
   cat("  ", label, "COMPLETE\n")
+  saveRDS(panels, file.path(output_dir, ct, "figure_data.rds"))   # read by the figures chunk
+  invisible(panels)
 }
 ```
 
@@ -232,6 +235,13 @@ gc(); closeAllConnections()
 run_cell_type("pp", "pp_area", "pp_area", "PP cell area",
               p_pp_comb, p_pp_comb_t1d, "pp_combined_model", "pp_combined_t1d")
 gc(); closeAllConnections()
+```
+
+```{r figures}
+# Figure 8 and Supplementary Figure S18, drawn from the panel data each cell-type chunk saved
+# (figure_data.rds), so the cell types can be run in separate sessions.
+source("Area/R/plot_area_figures.R")
+area_figures <- generate_area_figures("Area/Graphs/total_area", measure = "total")
 ```
 
 ```{r}

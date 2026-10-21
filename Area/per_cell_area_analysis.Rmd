@@ -102,6 +102,7 @@ pc_area_cols <- list(
 # Helper to run one cell type end-to-end (no singlets)
 run_pc_cell_type <- function(ct, cell_col, label, comb_diag, comb_t1d) {
   pc_col <- pc_area_cols[[ct]]
+  panels <- list(diag = list(), t1d = list())   # the published panels, for plot_area_figures.R
   cat("\n===", toupper(label), "===\n")
   cat("  Singlets SKIPPED (per-cell \u2261 total area; see Area/Graphs)\n")
 
@@ -109,16 +110,16 @@ run_pc_cell_type <- function(ct, cell_col, label, comb_diag, comb_t1d) {
   cat("  Diag SEOs...\n")
   d <- split_per_cell_plot(p_endobs, cell_col)
   m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14.rds")))
-  generate_area_diag_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
-                            file.path(output_dir, ct, "Diagnosis", "2to14"))
+  panels$diag[["2to14"]] <- generate_area_diag_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
+                            file.path(output_dir, ct, "Diagnosis", "2to14"))$main_diagnosis
   rm(m); gc(); closeAllConnections()
 
   # --- DIAGNOSIS: Islets ---
   cat("  Diag Islets...\n")
   d <- split_per_cell_plot(p_islets, cell_col)
   m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus.rds")))
-  generate_area_diag_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
-                            file.path(output_dir, ct, "Diagnosis", "15plus"))
+  panels$diag[["15plus"]] <- generate_area_diag_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
+                            file.path(output_dir, ct, "Diagnosis", "15plus"))$main_diagnosis
   rm(m); gc(); closeAllConnections()
 
   # --- DIAGNOSIS: Combined ---
@@ -133,16 +134,16 @@ run_pc_cell_type <- function(ct, cell_col, label, comb_diag, comb_t1d) {
   cat("  T1D SEOs...\n")
   d <- split_per_cell_plot(p_endobs_t1d, cell_col)
   m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14_t1d.rds")))
-  generate_area_t1d_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
-                           file.path(output_dir, ct, "T1D", "2to14"))
+  panels$t1d[["2to14"]] <- generate_area_t1d_plots(m, d, paste(label, "(SEOs)"), pc_col, TRUE,
+                           file.path(output_dir, ct, "T1D", "2to14"))$dd_overall
   rm(m); gc(); closeAllConnections()
 
   # --- T1D: Islets ---
   cat("  T1D Islets...\n")
   d <- split_per_cell_plot(p_islets_t1d, cell_col)
   m <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus_t1d.rds")))
-  generate_area_t1d_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
-                           file.path(output_dir, ct, "T1D", "15plus"))
+  panels$t1d[["15plus"]] <- generate_area_t1d_plots(m, d, paste(label, "(Islets)"), pc_col, TRUE,
+                           file.path(output_dir, ct, "T1D", "15plus"))$dd_overall
   rm(m); gc(); closeAllConnections()
 
   # --- T1D: Combined ---
@@ -154,6 +155,8 @@ run_pc_cell_type <- function(ct, cell_col, label, comb_diag, comb_t1d) {
   rm(m); gc(); closeAllConnections()
 
   cat("  ", label, "COMPLETE\n")
+  saveRDS(panels, file.path(output_dir, ct, "figure_data.rds"))   # read by the figures chunk
+  invisible(panels)
 }
 ```
 
@@ -179,6 +182,13 @@ gc(); closeAllConnections()
 run_pc_cell_type("pp", "pp_area", "PP per-cell area",
                   p_pp_comb, p_pp_comb_t1d)
 gc(); closeAllConnections()
+```
+
+```{r figures}
+# Supplementary Figures S17 and S19, drawn from the panel data each cell-type chunk saved
+# (figure_data.rds), so the cell types can be run in separate sessions.
+source("Area/R/plot_area_figures.R")
+pc_figures <- generate_area_figures("Area/Graphs/Per_Cell_Area", measure = "per_cell")
 ```
 
 ```{r}

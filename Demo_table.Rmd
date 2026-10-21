@@ -19,8 +19,9 @@ unique(no_cutoff_data_t1d$Donor)
 
 ```{r}
 library(readxl)
+library(janitor)
 
-path <- "C:/Users/hthor/Desktop/nPod results/Updated Supplementary Table S1 rev2.xlsx"
+path <- "Supplemental_Table_1.xlsx"
 
 ND  <- read_excel(path, sheet = 2, skip = 1) %>%
   clean_names()

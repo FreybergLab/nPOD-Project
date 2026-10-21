@@ -527,6 +527,17 @@ extract_brmsfit <- function(model, contrast_type) {
 
   } else {
     # ----- T1D-ONLY MODELS -----
+    # Grid values below are offsets from the T1D averages: the published T1D
+    # models were centred on ND + T1D data, so their 0 is not the T1D average
+    # (for duration it is ~1.4 years). Shift each grid by the mean of the
+    # model's own centred predictors before predicting, as the Table S2
+    # scripts do. For a model centred on T1D data the shift is 0.
+    t1d_ref <- sapply(c("Disease.Duration_c", "age_at_onset_c", "log_Islet.Cells_c"),
+                      function(v) if (v %in% names(model$data)) mean(model$data[[v]], na.rm = TRUE) else 0)
+    post_fitted_t1d <- function(model, grid) {
+      for (v in names(t1d_ref)) if (v %in% names(grid)) grid[[v]] <- grid[[v]] + t1d_ref[[v]]
+      post_fitted(model, grid)
+    }
     cat_grid <- expand.grid(
       Region = c("Head","Body","Tail"),
       Sex    = c("Female","Male"),
@@ -538,7 +549,7 @@ extract_brmsfit <- function(model, contrast_type) {
 
     # DD slope helper for grids that vary DD around 0
     dd_slope <- function(grid_with_dd, mask) {
-      pf <- post_fitted(model, grid_with_dd)
+      pf <- post_fitted_t1d(model, grid_with_dd)
       hi <- cell_avg(pf, mask & grid_with_dd$Disease.Duration_c ==  SLOPE_STEP)
       lo <- cell_avg(pf, mask & grid_with_dd$Disease.Duration_c == -SLOPE_STEP)
       (hi - lo) / (2 * SLOPE_STEP)
@@ -559,7 +570,7 @@ extract_brmsfit <- function(model, contrast_type) {
         Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
         Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
         age_at_onset_c = 0, log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
-      pf <- post_fitted(model, g)
+      pf <- post_fitted_t1d(model, g)
       for (reg in c("Head", "Body", "Tail")) {
         hi <- cell_avg(pf, g$Region == reg & g$Disease.Duration_c ==  SLOPE_STEP)
         lo <- cell_avg(pf, g$Region == reg & g$Disease.Duration_c == -SLOPE_STEP)
@@ -575,7 +586,7 @@ extract_brmsfit <- function(model, contrast_type) {
         Region = c("Head","Body","Tail"), Sex = c("Female","Male"),
         Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
         age_at_onset_c = 0, log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
-      pf <- post_fitted(model, g)
+      pf <- post_fitted_t1d(model, g)
       for (sx in c("Female", "Male")) {
         hi <- cell_avg(pf, g$Sex == sx & g$Disease.Duration_c ==  SLOPE_STEP)
         lo <- cell_avg(pf, g$Sex == sx & g$Disease.Duration_c == -SLOPE_STEP)
@@ -592,7 +603,7 @@ extract_brmsfit <- function(model, contrast_type) {
         Disease.Duration_c = c(-SLOPE_STEP, SLOPE_STEP),
         age_at_onset_c = c(AO_LO, AO_HI),
         log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
-      pf <- post_fitted(model, g)
+      pf <- post_fitted_t1d(model, g)
       for (ao_val in c(AO_LO, AO_HI)) {
         hi <- cell_avg(pf, g$age_at_onset_c == ao_val & g$Disease.Duration_c ==  SLOPE_STEP)
         lo <- cell_avg(pf, g$age_at_onset_c == ao_val & g$Disease.Duration_c == -SLOPE_STEP)
@@ -610,7 +621,7 @@ extract_brmsfit <- function(model, contrast_type) {
         Disease.Duration_c = 0,
         age_at_onset_c = c(-SLOPE_STEP, SLOPE_STEP),
         log_Islet.Cells_c = 0, stringsAsFactors = FALSE)
-      pf <- post_fitted(model, g)
+      pf <- post_fitted_t1d(model, g)
       hi <- cell_avg(pf, g$age_at_onset_c ==  SLOPE_STEP)
       lo <- cell_avg(pf, g$age_at_onset_c == -SLOPE_STEP)
       add("AO slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "AO slope"))
@@ -623,7 +634,7 @@ extract_brmsfit <- function(model, contrast_type) {
         Disease.Duration_c = 0, age_at_onset_c = 0,
         log_Islet.Cells_c = c(-SLOPE_STEP, SLOPE_STEP),
         stringsAsFactors = FALSE)
-      pf <- post_fitted(model, g)
+      pf <- post_fitted_t1d(model, g)
       hi <- cell_avg(pf, g$log_Islet.Cells_c ==  SLOPE_STEP)
       lo <- cell_avg(pf, g$log_Islet.Cells_c == -SLOPE_STEP)
       add("log_IC slope", post_summary((hi - lo) / (2 * SLOPE_STEP), "log_IC slope"))
@@ -631,7 +642,7 @@ extract_brmsfit <- function(model, contrast_type) {
 
     # Region pairwise (averaged over everything else)
     if (has("Region")) {
-      pf <- post_fitted(model, cat_grid)
+      pf <- post_fitted_t1d(model, cat_grid)
       h <- cell_avg(pf, cat_grid$Region == "Head")
       b <- cell_avg(pf, cat_grid$Region == "Body")
       t <- cell_avg(pf, cat_grid$Region == "Tail")
@@ -642,7 +653,7 @@ extract_brmsfit <- function(model, contrast_type) {
 
     # Male - Female
     if (has("Sex")) {
-      pf <- post_fitted(model, cat_grid)
+      pf <- post_fitted_t1d(model, cat_grid)
       f <- cell_avg(pf, cat_grid$Sex == "Female")
       m <- cell_avg(pf, cat_grid$Sex == "Male")
       add("Male-Female", post_summary(m - f, "Male-Female"))

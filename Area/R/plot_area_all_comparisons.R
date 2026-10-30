@@ -703,7 +703,7 @@ generate_all_area_plots <- function(model_dir = "Area/Models/Total_Area",
                      list(tag = "15plus", display = "Islets", data = split_area(area_islets, cc),
                           model_file = paste0("area_", ct, "_15plus.rds"), has_islet = TRUE))) {
       cat("  Diag", sz$tag, "...\n")
-      m <- readRDS(file.path(model_dir, sz$model_file))
+      m <- glmmTMB::up2date(readRDS(file.path(model_dir, sz$model_file)))
       generate_area_diag_plots(m, sz$data, paste(lab, paste0("(", sz$display, ")")), ac, sz$has_islet,
                                 file.path(output_dir, ct, "Diagnosis", sz$tag))
       rm(m); gc()
@@ -711,7 +711,7 @@ generate_all_area_plots <- function(model_dir = "Area/Models/Total_Area",
 
     # --- DIAGNOSIS: Combined ---
     cat("  Diag combined...\n")
-    m <- readRDS(file.path(model_dir, paste0(combined_model_names[[ct]], ".rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0(combined_model_names[[ct]], ".rds"))))
     generate_area_combined_diag_plots(m, split_area(combined_data[[ct]]$diag, cc),
                                        paste(lab, "(combined)"), ac,
                                        file.path(output_dir, ct, "Diagnosis", "combined"))
@@ -725,7 +725,7 @@ generate_all_area_plots <- function(model_dir = "Area/Models/Total_Area",
                      list(tag = "15plus", display = "Islets", data = split_area(area_islets_t1d, cc),
                           model_file = paste0("area_", ct, "_15plus_t1d.rds"), has_islet = TRUE))) {
       cat("  T1D", sz$tag, "...\n")
-      m <- readRDS(file.path(model_dir, sz$model_file))
+      m <- glmmTMB::up2date(readRDS(file.path(model_dir, sz$model_file)))
       generate_area_t1d_plots(m, sz$data, paste(lab, paste0("(", sz$display, ")")), ac, sz$has_islet,
                                file.path(output_dir, ct, "T1D", sz$tag))
       rm(m); gc()
@@ -733,7 +733,7 @@ generate_all_area_plots <- function(model_dir = "Area/Models/Total_Area",
 
     # --- T1D: Combined ---
     cat("  T1D combined...\n")
-    m <- readRDS(file.path(model_dir, paste0(combined_t1d_names[[ct]], ".rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0(combined_t1d_names[[ct]], ".rds"))))
     generate_area_combined_t1d_plots(m, split_area(combined_data[[ct]]$t1d, cc),
                                       paste(lab, "(combined)"), ac,
                                       file.path(output_dir, ct, "T1D", "combined"))

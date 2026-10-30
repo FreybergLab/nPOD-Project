@@ -653,10 +653,10 @@ generate_all_area_t1d_excel <- function(output_dir = "Area/Results/Total_Area") 
     cat("\nProcessing", cd$label, "cell...\n")
 
     # Load models — all use _t1d suffix
-    m1  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, "_t1d.rds"))
-    m2  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_2, "_t1d.rds"))
-    m15 <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_15, "_t1d.rds"))
-    mc  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_comb, "_t1d.rds"))
+    m1  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, "_t1d.rds")))
+    m2  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_2, "_t1d.rds")))
+    m15 <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_15, "_t1d.rds")))
+    mc  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_comb, "_t1d.rds")))
 
     # Prepare data subsets from correct source datasets (matching models)
     d1  <- split_area(area_singlets_t1d, cd$area_col)

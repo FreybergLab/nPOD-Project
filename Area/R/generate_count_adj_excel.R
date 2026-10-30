@@ -108,10 +108,10 @@ generate_all_count_adj_excel_diag <- function(
   for (cd in cell_defs) {
     cat("\nProcessing", cd$label, "...\n")
 
-    m1  <- readRDS(file.path(singlet_model_dir, paste0("area_", cd$short, "_1cell.rds")))
-    m2  <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_2to14.rds")))
-    m15 <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_15plus.rds")))
-    mc  <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_combined.rds")))
+    m1  <- glmmTMB::up2date(readRDS(file.path(singlet_model_dir, paste0("area_", cd$short, "_1cell.rds"))))
+    m2  <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_2to14.rds"))))
+    m15 <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_15plus.rds"))))
+    mc  <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_combined.rds"))))
 
     d1  <- split_area_singlet(area_singlets, cd$orig_area)
     d2  <- split_total_area_subset(area_endobs, cd$orig_area)
@@ -160,10 +160,10 @@ generate_all_count_adj_excel_t1d <- function(
   for (cd in cell_defs) {
     cat("\nProcessing", cd$label, "...\n")
 
-    m1  <- readRDS(file.path(singlet_model_dir, paste0("area_", cd$short, "_1cell_t1d.rds")))
-    m2  <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_2to14_t1d.rds")))
-    m15 <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_15plus_t1d.rds")))
-    mc  <- readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_combined_t1d.rds")))
+    m1  <- glmmTMB::up2date(readRDS(file.path(singlet_model_dir, paste0("area_", cd$short, "_1cell_t1d.rds"))))
+    m2  <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_2to14_t1d.rds"))))
+    m15 <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_15plus_t1d.rds"))))
+    mc  <- glmmTMB::up2date(readRDS(file.path(new_model_dir,     paste0("ta_",   cd$short, "_combined_t1d.rds"))))
 
     d1  <- split_area_singlet(area_singlets_t1d, cd$orig_area)
     d2  <- split_total_area_subset(area_endobs_t1d, cd$orig_area)

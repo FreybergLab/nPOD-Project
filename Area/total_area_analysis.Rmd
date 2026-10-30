@@ -17,7 +17,7 @@ library(dplyr)
 ```{r load-area-models}
 # Total area models
 for (f in list.files("Area/Models/Total_Area", pattern = "\\.rds$", full.names = TRUE)) {
-  assign(tools::file_path_sans_ext(basename(f)), readRDS(f))
+  assign(tools::file_path_sans_ext(basename(f)), glmmTMB::up2date(readRDS(f)))
   closeAllConnections()
 }
 
@@ -171,7 +171,7 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
     list(tag = "15plus", display = "Islets", data = split_area_plot(p_islets, cell_col),
          model_file = paste0("area_", ct, "_15plus.rds"), has_islet = TRUE))) {
     cat("  Diag", sz$tag, "...\n")
-    m <- readRDS(file.path(model_dir, sz$model_file))
+    m <- glmmTMB::up2date(readRDS(file.path(model_dir, sz$model_file)))
     panels$diag[[sz$tag]] <- generate_area_diag_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
                               area_col, sz$has_islet,
                               file.path(output_dir, ct, "Diagnosis", sz$tag))$main_diagnosis
@@ -179,7 +179,7 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
   }
   
   cat("  Diag combined...\n")
-  m <- readRDS(file.path(model_dir, paste0(comb_model_name, ".rds")))
+  m <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0(comb_model_name, ".rds"))))
   generate_area_combined_diag_plots(m, split_area_plot(comb_diag, cell_col),
                                      paste(label, "(combined)"), area_col,
                                      file.path(output_dir, ct, "Diagnosis", "combined"))
@@ -193,7 +193,7 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
     list(tag = "15plus", display = "Islets", data = split_area_plot(p_islets_t1d, cell_col),
          model_file = paste0("area_", ct, "_15plus_t1d.rds"), has_islet = TRUE))) {
     cat("  T1D", sz$tag, "...\n")
-    m <- readRDS(file.path(model_dir, sz$model_file))
+    m <- glmmTMB::up2date(readRDS(file.path(model_dir, sz$model_file)))
     panels$t1d[[sz$tag]] <- generate_area_t1d_plots(m, sz$data, paste(label, paste0("(", sz$display, ")")),
                              area_col, sz$has_islet,
                              file.path(output_dir, ct, "T1D", sz$tag))$dd_overall
@@ -201,7 +201,7 @@ run_cell_type <- function(ct, area_col, cell_col, label, comb_diag, comb_t1d, co
   }
   
   cat("  T1D combined...\n")
-  m <- readRDS(file.path(model_dir, paste0(comb_t1d_name, ".rds")))
+  m <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0(comb_t1d_name, ".rds"))))
   generate_area_combined_t1d_plots(m, split_area_plot(comb_t1d, cell_col),
                                     paste(label, "(combined)"), area_col,
                                     file.path(output_dir, ct, "T1D", "combined"))

@@ -108,10 +108,10 @@ generate_all_pc_area_t1d_excel <- function(output_dir = "Area/Results/Per_Cell_A
     cat("\nProcessing", cd$label, "...\n")
     
     # Singlet from Area/Models (reuse), rest from PerCellArea/Models
-    m1  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, "_t1d.rds"))
-    m2  <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_2, "_t1d.rds"))
-    m15 <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_15, "_t1d.rds"))
-    mc  <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_comb, "_t1d.rds"))
+    m1  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, "_t1d.rds")))
+    m2  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_2, "_t1d.rds")))
+    m15 <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_15, "_t1d.rds")))
+    mc  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_comb, "_t1d.rds")))
     
     # Singlet data uses original area col from singlets dataset
     d1  <- split_area(area_singlets_t1d, cd$orig_area)

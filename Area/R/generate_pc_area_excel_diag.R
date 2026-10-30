@@ -110,11 +110,11 @@ generate_all_pc_area_excel <- function(output_dir = "Area/Results/Per_Cell_Area/
     cat("\nProcessing", cd$label, "...\n")
     
     # Singlet model from Area/Models (reuse — per-cell ≡ total for singlets)
-    m1  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, ".rds"))
+    m1  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, ".rds")))
     # SEO and Islet from PerCellArea/Models
-    m2  <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_2, ".rds"))
-    m15 <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_15, ".rds"))
-    mc  <- readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_comb, ".rds"))
+    m2  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_2, ".rds")))
+    m15 <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_15, ".rds")))
+    mc  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Per_Cell_Area/", cd$prefix_comb, ".rds")))
     
     # Singlet data — uses original area col (identical to per-cell for singlets)
     d1  <- split_area(area_singlets, cd$orig_area)

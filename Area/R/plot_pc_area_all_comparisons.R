@@ -95,7 +95,7 @@ generate_all_pc_area_plots <- function(model_dir = "Area/Models/Per_Cell_Area",
     # --- DIAGNOSIS: Small EOs ---
     cat("  Diag 2to14...\n")
     d2 <- split_per_cell(area_endobs, cc)
-    m2 <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14.rds")))
+    m2 <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14.rds"))))
     generate_area_diag_plots(m2, d2, paste(lab, "(SEOs)"), pc_col, TRUE,
                               file.path(output_dir, ct, "Diagnosis", "2to14"))
     rm(m2); gc()
@@ -103,14 +103,14 @@ generate_all_pc_area_plots <- function(model_dir = "Area/Models/Per_Cell_Area",
     # --- DIAGNOSIS: Islets ---
     cat("  Diag 15plus...\n")
     d15 <- split_per_cell(area_islets, cc)
-    m15 <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus.rds")))
+    m15 <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus.rds"))))
     generate_area_diag_plots(m15, d15, paste(lab, "(Islets)"), pc_col, TRUE,
                               file.path(output_dir, ct, "Diagnosis", "15plus"))
     rm(m15); gc()
 
     # --- DIAGNOSIS: Combined ---
     cat("  Diag combined...\n")
-    mc <- readRDS(file.path(model_dir, paste0("pc_", ct, "_combined.rds")))
+    mc <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_combined.rds"))))
     dc <- split_per_cell(combined_data[[ct]]$diag, cc)
     generate_area_combined_diag_plots(mc, dc, paste(lab, "(combined)"), pc_col,
                                        file.path(output_dir, ct, "Diagnosis", "combined"))
@@ -119,7 +119,7 @@ generate_all_pc_area_plots <- function(model_dir = "Area/Models/Per_Cell_Area",
     # --- T1D: Small EOs ---
     cat("  T1D 2to14...\n")
     d2t <- split_per_cell(area_endobs_t1d, cc)
-    m2t <- readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14_t1d.rds")))
+    m2t <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_2to14_t1d.rds"))))
     generate_area_t1d_plots(m2t, d2t, paste(lab, "(SEOs)"), pc_col, TRUE,
                              file.path(output_dir, ct, "T1D", "2to14"))
     rm(m2t); gc()
@@ -127,14 +127,14 @@ generate_all_pc_area_plots <- function(model_dir = "Area/Models/Per_Cell_Area",
     # --- T1D: Islets ---
     cat("  T1D 15plus...\n")
     d15t <- split_per_cell(area_islets_t1d, cc)
-    m15t <- readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus_t1d.rds")))
+    m15t <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_15plus_t1d.rds"))))
     generate_area_t1d_plots(m15t, d15t, paste(lab, "(Islets)"), pc_col, TRUE,
                              file.path(output_dir, ct, "T1D", "15plus"))
     rm(m15t); gc()
 
     # --- T1D: Combined ---
     cat("  T1D combined...\n")
-    mct <- readRDS(file.path(model_dir, paste0("pc_", ct, "_combined_t1d.rds")))
+    mct <- glmmTMB::up2date(readRDS(file.path(model_dir, paste0("pc_", ct, "_combined_t1d.rds"))))
     dct <- split_per_cell(combined_data[[ct]]$t1d, cc)
     generate_area_combined_t1d_plots(mct, dct, paste(lab, "(combined)"), pc_col,
                                       file.path(output_dir, ct, "T1D", "combined"))

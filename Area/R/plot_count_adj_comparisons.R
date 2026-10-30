@@ -121,7 +121,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- Diagnosis: Singlets (reuse existing total-area singlet model) ----
     cat("  Diag Singlets...\n")
-    m <- readRDS(file.path(singlet_model_dir, paste0("area_", ct, "_1cell.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(singlet_model_dir, paste0("area_", ct, "_1cell.rds"))))
     d <- split_area_singlet(area_singlets, cc)
     generate_area_diag_plots(m, d, paste(lab, "(Singlets)"), ac,
                               has_islet = FALSE,
@@ -130,7 +130,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- Diagnosis: SEO (count-adjusted) ----
     cat("  Diag SEO...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_2to14.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_2to14.rds"))))
     d <- split_total_area_subset(area_endobs, cc)
     generate_area_diag_plots(m, d, paste(lab, "(SEOs)"), ac,
                               has_islet = FALSE,
@@ -139,7 +139,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- Diagnosis: Islet (count-adjusted) ----
     cat("  Diag Islet...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_15plus.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_15plus.rds"))))
     d <- split_total_area_subset(area_islets, cc)
     generate_area_diag_plots(m, d, paste(lab, "(Islets)"), ac,
                               has_islet = FALSE,
@@ -148,7 +148,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- Diagnosis: Combined ----
     cat("  Diag Combined...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_combined.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_combined.rds"))))
     d <- split_total_area_combined(combined_data[[ct]]$diag, cc)
     generate_area_combined_diag_plots(m, d, paste(lab, "(combined)"), ac,
                                        file.path(output_dir, ct, "Diagnosis", "combined"))
@@ -156,7 +156,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- T1D: Singlets ----
     cat("  T1D Singlets...\n")
-    m <- readRDS(file.path(singlet_model_dir, paste0("area_", ct, "_1cell_t1d.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(singlet_model_dir, paste0("area_", ct, "_1cell_t1d.rds"))))
     d <- split_area_singlet(area_singlets_t1d, cc)
     generate_area_t1d_plots(m, d, paste(lab, "(Singlets)"), ac,
                              has_islet = FALSE,
@@ -165,7 +165,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- T1D: SEO ----
     cat("  T1D SEO...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_2to14_t1d.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_2to14_t1d.rds"))))
     d <- split_total_area_subset(area_endobs_t1d, cc)
     generate_area_t1d_plots(m, d, paste(lab, "(SEOs)"), ac,
                              has_islet = FALSE,
@@ -174,7 +174,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- T1D: Islet ----
     cat("  T1D Islet...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_15plus_t1d.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_15plus_t1d.rds"))))
     d <- split_total_area_subset(area_islets_t1d, cc)
     generate_area_t1d_plots(m, d, paste(lab, "(Islets)"), ac,
                              has_islet = FALSE,
@@ -183,7 +183,7 @@ generate_all_count_adj_plots <- function(
 
     # ---- T1D: Combined ----
     cat("  T1D Combined...\n")
-    m <- readRDS(file.path(new_model_dir, paste0("ta_", ct, "_combined_t1d.rds")))
+    m <- glmmTMB::up2date(readRDS(file.path(new_model_dir, paste0("ta_", ct, "_combined_t1d.rds"))))
     d <- split_total_area_combined(combined_data[[ct]]$t1d, cc)
     generate_area_combined_t1d_plots(m, d, paste(lab, "(combined)"), ac,
                                       file.path(output_dir, ct, "T1D", "combined"))

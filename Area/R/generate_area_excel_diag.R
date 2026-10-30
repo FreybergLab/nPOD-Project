@@ -9,6 +9,12 @@ library(glmmTMB)
 library(emmeans)
 library(writexl)
 
+# Holm across the levels of the conditioning factor. pairs(..., adjust = "holm")
+# on `~ A | B` adjusts within each level of B, where there is only one contrast,
+# so on its own it adjusts nothing; widening the family first gives the Holm
+# adjustment these tables are labelled with.
+holm_across <- function(con) update(con, by = NULL, adjust = "holm")
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -265,7 +271,7 @@ generate_cell_type_excel <- function(
   )
   
   em_diag_by_obj <- get_emm_log_scale(combined_model, ~ Diagnosis | object_type, data = combined_data)
-  contr_diag_by_obj <- pairs(em_diag_by_obj, adjust = "holm", reverse = TRUE)
+  contr_diag_by_obj <- holm_across(pairs(em_diag_by_obj, reverse = TRUE))
   contr_diag_by_obj_df <- extract_contrast_results(as.data.frame(summary(contr_diag_by_obj)))
   
   diag_within_obj <- tibble(
@@ -519,7 +525,7 @@ generate_cell_type_excel <- function(
     )
     
     em_by_region <- get_emm_log_scale(model, ~ Diagnosis | Region, data = data)
-    contr_diag <- pairs(em_by_region, adjust = "holm", reverse = TRUE)
+    contr_diag <- holm_across(pairs(em_by_region, reverse = TRUE))
     contr_diag_df <- extract_contrast_results(as.data.frame(summary(contr_diag)))
     
     diag_within_region <- tibble(
@@ -589,7 +595,7 @@ generate_cell_type_excel <- function(
     )
     
     em_by_sex <- get_emm_log_scale(model, ~ Diagnosis | Sex, data = data)
-    contr_diag <- pairs(em_by_sex, adjust = "holm", reverse = TRUE)
+    contr_diag <- holm_across(pairs(em_by_sex, reverse = TRUE))
     contr_diag_df <- extract_contrast_results(as.data.frame(summary(contr_diag)))
     
     diag_within_sex <- tibble(
@@ -604,7 +610,7 @@ generate_cell_type_excel <- function(
     )
     
     em_by_diag <- get_emm_log_scale(model, ~ Sex | Diagnosis, data = data)
-    contr_sex <- pairs(em_by_diag, adjust = "holm")
+    contr_sex <- holm_across(pairs(em_by_diag))
     contr_sex_df <- extract_contrast_results(as.data.frame(summary(contr_sex)))
     
     sex_within_diag <- tibble(
@@ -902,10 +908,10 @@ generate_all_area_excel <- function(output_dir = "Area/Results/Total_Area") {
     cat("\nProcessing", cd$label, "cell...\n")
     
     # Load models
-    m1  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, ".rds"))
-    m2  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_2, ".rds"))
-    m15 <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_15, ".rds"))
-    mc  <- readRDS(paste0("Area/Models/Total_Area/", cd$prefix_comb, ".rds"))
+    m1  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_1, ".rds")))
+    m2  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_2, ".rds")))
+    m15 <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_15, ".rds")))
+    mc  <- glmmTMB::up2date(readRDS(paste0("Area/Models/Total_Area/", cd$prefix_comb, ".rds")))
     
     # Prepare data subsets from correct source datasets (matching models)
     d1  <- split_area(area_singlets, cd$area_col)

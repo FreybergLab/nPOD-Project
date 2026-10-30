@@ -1339,9 +1339,9 @@ generate_all_density_plots <- function(output_dir = "Density/Graphs/All_Comparis
       Donor  = factor(Donor)
     ) %>% droplevels()
 
-  density_diag   <- readRDS("Density/Models/density_diag.rds")
-  density_t1d    <- readRDS("Density/Models/density_t1d.rds")
-  density_spline <- readRDS("Density/Models/density_spline.rds")
+  density_diag   <- glmmTMB::up2date(readRDS("Density/Models/density_diag.rds"))
+  density_t1d    <- glmmTMB::up2date(readRDS("Density/Models/density_t1d.rds"))
+  density_spline <- glmmTMB::up2date(readRDS("Density/Models/density_spline.rds"))
 
   cat("  density_data:", nrow(density_data), "rows,", n_distinct(density_data$Donor), "donors\n")
   cat("  density_t1d: ", nrow(density_t1d_data), "rows,", n_distinct(density_t1d_data$Donor), "donors\n\n")

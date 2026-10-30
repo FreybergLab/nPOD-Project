@@ -19,6 +19,12 @@ library(glmmTMB)
 library(emmeans)
 library(writexl)
 
+# Holm across the levels of the conditioning factor. pairs(..., adjust = "holm")
+# on `~ A | B` adjusts within each level of B, where there is only one contrast,
+# so on its own it adjusts nothing; widening the family first gives the Holm
+# adjustment these tables are labelled with.
+holm_across <- function(con) update(con, by = NULL, adjust = "holm")
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -418,7 +424,7 @@ generate_density_diag_excel <- function(model, data, output_dir = "Density/Resul
   )
   
   em_diag_by_region <- emmeans(model, ~ Diagnosis | Region)
-  contr_diag_by_region <- pairs(em_diag_by_region, adjust = "holm", reverse = TRUE)
+  contr_diag_by_region <- holm_across(pairs(em_diag_by_region, reverse = TRUE))
   contr_dbr_df <- extract_contrast_results(as.data.frame(summary(contr_diag_by_region)))
   
   diag_within_region <- tibble(
@@ -476,7 +482,7 @@ generate_density_diag_excel <- function(model, data, output_dir = "Density/Resul
   )
   
   em_diag_by_sex <- emmeans(model, ~ Diagnosis | Sex)
-  contr_diag_by_sex <- pairs(em_diag_by_sex, adjust = "holm", reverse = TRUE)
+  contr_diag_by_sex <- holm_across(pairs(em_diag_by_sex, reverse = TRUE))
   contr_dbs_df <- extract_contrast_results(as.data.frame(summary(contr_diag_by_sex)))
   
   diag_within_sex <- tibble(
@@ -490,7 +496,7 @@ generate_density_diag_excel <- function(model, data, output_dir = "Density/Resul
   )
   
   em_sex_by_diag <- emmeans(model, ~ Sex | Diagnosis)
-  contr_sex_by_diag <- pairs(em_sex_by_diag, adjust = "holm")
+  contr_sex_by_diag <- holm_across(pairs(em_sex_by_diag))
   contr_sbd_df <- extract_contrast_results(as.data.frame(summary(contr_sex_by_diag)))
   
   sex_within_diag <- tibble(
@@ -534,7 +540,7 @@ generate_density_diag_excel <- function(model, data, output_dir = "Density/Resul
   )
   
   em_sex_by_region <- emmeans(model, ~ Sex | Region)
-  contr_sex_by_region <- pairs(em_sex_by_region, adjust = "holm")
+  contr_sex_by_region <- holm_across(pairs(em_sex_by_region))
   contr_sbr_df <- extract_contrast_results(as.data.frame(summary(contr_sex_by_region)))
   
   sex_within_region <- tibble(
@@ -636,7 +642,7 @@ generate_density_diag_excel <- function(model, data, output_dir = "Density/Resul
   age_dr_df <- format_trend_summary(em_age_dr, c("Diagnosis", "Region"))
   
   em_age_diag_by_region <- emtrends(model, ~ Diagnosis | Region, var = "Age_c")
-  contr_age_diag_by_region <- pairs(em_age_diag_by_region, adjust = "holm", reverse = TRUE)
+  contr_age_diag_by_region <- holm_across(pairs(em_age_diag_by_region, reverse = TRUE))
   age_diag_within_region <- format_trend_contrasts(contr_age_diag_by_region)
   age_diag_within_region$Region <- as.data.frame(summary(contr_age_diag_by_region))$Region
   age_diag_within_region <- age_diag_within_region %>% select(Region, everything())
@@ -917,7 +923,7 @@ generate_density_t1d_excel <- function(model, data, output_dir = "Density/Result
   )
   
   em_sex_by_region <- emmeans(model, ~ Sex | Region)
-  contr_sex_by_region <- pairs(em_sex_by_region, adjust = "holm")
+  contr_sex_by_region <- holm_across(pairs(em_sex_by_region))
   contr_sbr_df <- extract_contrast_results(as.data.frame(summary(contr_sex_by_region)))
   
   sex_within_region <- tibble(
@@ -1263,8 +1269,8 @@ generate_all_density_excel <- function(output_dir = "Density/Results") {
   
   # Load models
   cat("Loading models...\n")
-  density_diag  <- readRDS("Density/Models/density_diag.rds")
-  density_t1d_model <- readRDS("Density/Models/density_t1d.rds")
+  density_diag  <- glmmTMB::up2date(readRDS("Density/Models/density_diag.rds"))
+  density_t1d_model <- glmmTMB::up2date(readRDS("Density/Models/density_t1d.rds"))
   
   # Generate Excel files
   generate_density_diag_excel(density_diag, density_dataset, output_dir)
@@ -1282,10 +1288,10 @@ if (interactive()) {
   cat("\nTo generate all density Excel files, run:\n")
   cat("  generate_all_density_excel()\n\n")
   cat("Or individually:\n")
-  cat("  density_diag <- readRDS('Density/Models/density_diag.rds')\n")
+  cat("  density_diag <- glmmTMB::up2date(readRDS('Density/Models/density_diag.rds'))\n")
   cat("  density_dataset <- readRDS('Data/density_data.rds')\n")
   cat("  generate_density_diag_excel(density_diag, density_dataset)\n\n")
-  cat("  density_t1d_model <- readRDS('Density/Models/density_t1d.rds')\n")
+  cat("  density_t1d_model <- glmmTMB::up2date(readRDS('Density/Models/density_t1d.rds'))\n")
   cat("  density_t1d_data  <- readRDS('Data/density_data_t1d.rds')   # use pre-centered T1D data\n")
   cat("  generate_density_t1d_excel(density_t1d_model, density_t1d_data)\n")
 }

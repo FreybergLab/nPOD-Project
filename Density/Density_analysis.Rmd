@@ -17,9 +17,9 @@ knitr::opts_knit$set(root.dir = normalizePath(".."))
 density_dataset  <- readRDS("Data/density_data.rds")
 density_t1d <- readRDS("Data/density_data_t1d.rds")
 
-density_diag      <- readRDS("Density/Models/density_diag.rds")
-density_t1d_model <- readRDS("Density/Models/density_t1d.rds")
-density_spline    <- readRDS("Density/Models/density_spline.rds")
+density_diag      <- glmmTMB::up2date(readRDS("Density/Models/density_diag.rds"))
+density_t1d_model <- glmmTMB::up2date(readRDS("Density/Models/density_t1d.rds"))
+density_spline    <- glmmTMB::up2date(readRDS("Density/Models/density_spline.rds"))
 ```
 
 ```{r}

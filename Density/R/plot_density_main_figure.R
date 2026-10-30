@@ -144,7 +144,10 @@ plot_panel_d <- function(Density, model_region) {
     group_by(Donor, Diagnosis, Region) %>%
     summarise(mean_density = mean(islet_density, na.rm = TRUE), .groups = "drop")
   
-  pairs_df <- as.data.frame(pairs(emmeans(model_region, ~ Diagnosis | Region, type = "response")))
+  # Holm across regions, as in Supplementary Table 2 (on its own, pairs() adjusts
+  # within each region, where there is only one contrast)
+  pairs_df <- as.data.frame(update(pairs(emmeans(model_region, ~ Diagnosis | Region, type = "response")),
+                                   by = NULL, adjust = "holm"))
   stars <- sapply(pairs_df$p.value, p_to_stars)
   y_max <- max(donor_means_region$mean_density, na.rm = TRUE)
   
@@ -177,7 +180,9 @@ plot_panel_e <- function(Density, model_sex) {
     group_by(Donor, Diagnosis, Sex) %>%
     summarise(mean_density = mean(islet_density, na.rm = TRUE), .groups = "drop")
   
-  pairs_df <- as.data.frame(pairs(emmeans(model_sex, ~ Sex | Diagnosis, type = "response")))
+  # Holm across the two diagnoses, as in Supplementary Table 2
+  pairs_df <- as.data.frame(update(pairs(emmeans(model_sex, ~ Sex | Diagnosis, type = "response")),
+                                   by = NULL, adjust = "holm"))
   t1d_stars <- p_to_stars(pairs_df$p.value[pairs_df$Diagnosis == "T1D"])
   
   ggplot() +

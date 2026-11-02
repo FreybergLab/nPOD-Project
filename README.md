@@ -18,11 +18,12 @@ nPOD-Project/
 ├── Marker/                         Step 5: Ki-67 and CD3 rate models, workbooks and Supplementary Figure 16
 ├── Density/  Proportion/  Count/  Ratio/  Area/
 │                                   Step 6: result workbooks and figures for each analysis
+├── Figure_3-6_code/                Step 6: heatmap and density-curve panels of Figures 3–6
 ├── summary_dot_map_v3.Rmd          Supplementary Figure 23 (results summary)
 ├── Demo_table.Rmd                  Table 1
 ├── colors_master.R                 Shared plotting palette
 ├── Threshold/                      Supplementary Figure 4 (the 15-cell islet threshold)
-├── Pseudotime/                     [TO ADD] UMAP and pseudotime analysis
+├── Pseudotime/                     Step 7: UMAP and pseudotime (Figure 9; Supplementary Figures 20–22)
 ├── Sensitivity/                    Step 8: data checks and sensitivity analyses (Supplementary Table 4)
 └── Results/                        Model-output workbooks behind Supplementary Table 2
 ```
@@ -71,6 +72,8 @@ Endocrine-object size classes and the islet thresholds are defined in `Create_co
 - **Data handling and plotting:** tidyverse 2.0.0 (dplyr 1.2.1, readr 2.2.0, stringr 1.6.0, ggplot2 4.0.3), janitor 2.2.1, readxl 1.5.0.1, openxlsx 4.2.9, writexl 2.0.1, patchwork 1.3.2, cowplot 1.2.0, ggtext 0.2.0, scales 1.4.0, rlang 1.2.0, knitr 1.52, officer 0.7.7, flextable 0.10.3
 - **Mixed models:** glmmTMB 1.1.15.2 (the saved models were fitted with 1.1.9; see Step 3), emmeans 2.0.4, car 3.1.5
 - **Bayesian models:** fitted on the cluster with brms 2.22.0, ordbetareg 0.8, and cmdstanr 0.9.0 with CmdStan 2.37.0; summarised locally with brms 2.23.0 and coda 0.19-4.1
+- **Figures 3–6 heatmap and density panels:** data.table, ggplotify, egg and plyr, with ggplot2 and ggpubr (versions not recorded)
+- **Pseudotime:** monocle3 1.4.26, Seurat 5.3.1, SeuratWrappers 0.4.0, igraph 2.1.4, ggpubr 0.6.1
 
 ## Running the analysis
 
@@ -135,7 +138,9 @@ Earlier per-islet count (abundance) models were superseded by these rate models 
 |---|---|
 | `Density/Density_analysis.Rmd` | Figure 2; Supplementary Figure 5 |
 | `Proportion/Proportion_analysis.Rmd` | Supplementary Figures 6–9 and 11–15; the model panels of Figures 3–6 (`generate_main_3way_figures()`) |
+| `Figure_3-6_code/nPOD_visualization_code.R` | The heatmap and density-curve panels of Figures 3–6, one cell type per run. Unlike the other scripts, run it with `Figure_3-6_code/` as the working directory (it reads `../Data/quad_data.csv`), after setting `cell.type` at the top to `"ins"`, `"glu"`, `"soma"` or `"PP"`. It writes `<cell.type>_grouped_v4.pdf`. |
 | `Count/Count_analysis.Rmd` | Cell-count result workbooks |
+| `Count/Plot_Figure_7.Rmd` | Figure 7 (sources `Count/R/plot_figure_7.R`) |
 | `Ratio/Ratio_analysis.Rmd` | Ratio result workbooks. For Supplementary Figure 10, then run `generate_supplementary_figure_S10()` (in `Ratio/R/plot_ratio_all_comparisons.R`) |
 | `Area/total_area_analysis.Rmd` | Figure 8; Supplementary Figure 18 |
 | `Area/per_cell_area_analysis.Rmd` | Supplementary Figures 17 and 19 |
@@ -147,7 +152,11 @@ Earlier per-islet count (abundance) models were superseded by these rate models 
 
 The area analyses save about 180 plots per cell type, and a single R session can run out of file handles ("Too many open files"). Each cell type saves the data for the published figures as it finishes, so the cell types can be run in separate sessions; the published figures are then drawn by `Area/R/plot_area_figures.R`.
 
-**Step 7: pseudotime.** **[TO ADD]** UMAP and pseudotime code for Figure 9 and Supplementary Figures 20–22.
+**Step 7: pseudotime** (`Pseudotime/`). Run `Pseudotime/pseudo.r` from the repository root after Step 1; it reads `Data/quad_data.csv`. Each islet is one observation, with its β-, α-, δ-, PP- and other-cell counts as the five features. The script builds a Monocle 3 object, computes the UMAP, fits pseudotime trajectories for the head, body/tail, <20-year and 20–40-year subsets, and draws Figure 9 and Supplementary Figures 20–22 in the R session; it does not write figure files. It saves the UMAP object and each trajectory's results to `Pseudotime/Results/` (not tracked by git) and each trajectory's root cells to `Pseudotime/roots/`. `Pseudotime/R/irlba_small_matrix_fix.R`, sourced at the top, lets `preprocess_cds()` run on the five-feature matrix.
+
+**Which panels reproduce.** The UMAP is deterministic, so rerunning the script reproduces Figure 9A, 9B and 9E and Supplementary Figures 20–22. The pseudotime panels (Figure 9C, 9D, 9F and 9G) cannot be regenerated exactly, and the published versions are kept. Their trajectories start from root clusters that were chosen by cluster number in the original analysis session (for example, clusters 30, 13, 15, 14 and 24 for the head). Monocle 3's clustering numbered the clusters differently when the script was rerun, so the same numbers now select different islets, and the root cells from that session are not part of this repository.
+
+**Reproducibility from here on.** The script fixes the clustering seed (`SEED`, passed to `cluster_cells()`), saves the root cells each trajectory uses to `Pseudotime/roots/`, and reads them back on later runs instead of looking roots up by cluster number. Reruns therefore give the same trajectories every time. Those trajectories differ from the published panels, because their roots were taken from the same cluster numbers in the seeded run. Each saved root file also lists the islets' image IDs, and the script stops if `Data/quad_data.csv` no longer matches them.
 
 **Step 8: sensitivity analyses** (Supplementary Table 4).
 
@@ -162,7 +171,6 @@ The area analyses save about 180 plots per cell type, and a single R session can
 - **Figure 1** is a schematic.
 - **Supplementary Figure 1** shows annotated images.
 - **Supplementary Figures 2–3** (classifier validation) were made in GraphPad Prism 10.4.0 from manual versus AI cell counts.
-- **Figures 3–6** (heatmap and density-curve panels) and **Figure 7** **[TO ADD]** were made with code not yet in this repository.
 - **Figure 9 and Supplementary Figures 20–22:** see Step 7.
 
 ## Results folder

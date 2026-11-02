@@ -180,5 +180,5 @@ The area analyses save about 180 plots per cell type, and a single R session can
 ## Citation, license and contact
 
 - **Citation:** https://www.biorxiv.org/content/10.64898/2026.06.05.730081v1
-- **License:** **[TO ADD]**
+- **License:** MIT; see [`LICENSE`](LICENSE).
 - **Contact:** freyberg@pitt.edu

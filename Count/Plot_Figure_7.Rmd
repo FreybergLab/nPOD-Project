@@ -1,0 +1,15 @@
+---
+title: "Plot Figure 7"
+output: html_document
+date: "2026-10-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+source("Count/R/plot_figure_7.R")
+fig7 <- generate_figure_7()
+```
+
